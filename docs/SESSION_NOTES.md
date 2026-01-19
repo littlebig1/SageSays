@@ -5,6 +5,132 @@
 
 ---
 
+## 📅 2026-01-19 (Late Evening Part 7) - Testing Strategy Planning 🧪
+
+**Goal**: Document comprehensive testing improvement strategy
+
+### What We Did ✅
+
+1. **Assessed Current Testing Infrastructure**
+   - Only 1 test file: `src/agent/__tests__/guard.test.ts` (13 tests)
+   - Test coverage: ~5-10%
+   - Multiple manual test scripts in `/scripts` (not unit tests)
+   - `npm run validate` does NOT run tests (by design for now)
+
+2. **Analyzed Code Testability**
+   - ✅ Guard: Excellent (pure function, 100% tested)
+   - ❌ Agents: Poor (hard-coded LLM dependencies)
+   - ❌ Orchestrator: Very Poor (hard-coded everything)
+   - ❌ Database Tools: Poor (direct DB access, no mocking)
+   - Identified 4 major architectural issues blocking testability:
+     - Hard-coded dependencies (can't inject mocks)
+     - Direct database access (can't mock queries)
+     - Global config singleton (can't override)
+     - No interfaces/abstractions (tight coupling)
+
+3. **Created Phase 7: Testing Infrastructure in ROADMAP**
+   - **7.1: Quick Win Tests** (2-3 hours, no refactoring needed)
+     - Test semantic detection, retry logic, confidence calculations
+     - Can implement immediately, safe to do anytime
+     - Target: 25-30% coverage
+   
+   - **7.2: Architecture Refactoring** (4-6 hours, major changes)
+     - Dependency injection pattern
+     - Extract interfaces (IPlanner, ISQLWriter, etc.)
+     - Database layer abstraction (repositories)
+     - Config injection
+     - **DO AFTER Phase 3 stabilizes**
+   
+   - **7.3: Integration Tests** (3-4 hours)
+     - End-to-end flow tests
+     - SMART mode tests
+     - CLI command tests
+     - Target: 60-70% coverage
+   
+   - **7.4: Test Automation & CI/CD** (2-3 hours)
+     - GitHub Actions
+     - Coverage reporting
+     - Performance testing
+
+4. **Documented Testing Milestones**
+   - Milestone 1: 25-30% (Quick Wins before Phase 4)
+   - Milestone 2: 60-70% (After Phase 3 stabilizes)
+   - Milestone 3: 80-90% (v2.0.0)
+
+### Key Decisions 🎯
+
+**Decision 1**: Keep current architecture during rapid prototyping
+- Phases 1-3 don't need heavy testing
+- Manual testing sufficient for exploration
+- Avoid premature optimization
+
+**Decision 2**: Phase 7.1 (Quick Wins) before Phase 4
+- Pure functions are easy to test now
+- No breaking changes, low risk
+- Builds confidence for complex logic in Phase 4
+
+**Decision 3**: Major refactoring (7.2) after Phase 3
+- Wait until learning features are stable
+- Avoid wasted refactoring if design changes
+- 4-6 hours is significant investment
+
+### Files Changed 📝
+
+- **Updated**: `docs/ROADMAP.md`
+  - Added Phase 7: Testing Infrastructure (complete breakdown)
+  - Added testing strategy note
+  - Updated "Next Target" to include parallel testing track
+
+### Next Steps ➡️
+
+**Immediate**:
+- Complete validation testing (API key, manual queries)
+- Push to GitHub
+- Start Phase 3: Learning from User Corrections
+
+**Before Phase 4**:
+- Implement Phase 7.1: Quick Win Tests (2-3 hours)
+- Build confidence for complex logic handling
+
+**After Phase 3 Stabilizes**:
+- Consider Phase 7.2: Architecture refactoring (if needed)
+- Evaluate if benefits justify the effort
+
+### Blockers 🚧
+
+None - testing is optional enhancement, not blocking progress
+
+### Additional Notes 📝
+
+**Dynamic Confidence Issue Discovered**:
+- User noticed confidence is always showing 70% in SMART mode
+- Investigation revealed: confidence is hardcoded to 'medium' in orchestrator (line 128)
+- Root cause: Placeholder implementation - LLM not asked for confidence rating
+- Added to Phase 7.1: "Dynamic Confidence Scoring" task
+- Estimated effort: 1-2 hours to implement
+- Not blocking Phase 3 - SMART mode still works based on semantic detection
+
+**New Phase 8: Performance & Query Optimization**:
+- User requested feature to handle query timeouts intelligently
+- Original proposal: Kill query → Ask to extend timeout → EXPLAIN → Optimize → Retry
+- Improved flow suggested:
+  1. Timeout detected → Run EXPLAIN immediately
+  2. Analyze with LLM (detect full scans, missing indexes, inefficient joins)
+  3. Generate optimized query
+  4. Show user options: optimized query (default) / extend timeout / simplify / cancel
+  5. If still fails → Suggest specific indexes or query splitting
+  6. Learn from successful optimizations (save as semantic patterns)
+- Created comprehensive Phase 8 with 4 sub-phases:
+  - 8.1: Smart Timeout Handling (6-8 hours)
+  - 8.2: Proactive Performance Analysis (4-5 hours)
+  - 8.3: Performance Monitoring & Learning (3-4 hours)
+  - 8.4: Advanced Optimization Strategies (4-6 hours)
+- Total estimated effort: 17-23 hours
+- Removed redundant "Query Optimization" from future ideas (now a full phase)
+- Added Phase 8 success metrics
+
+---
+
 ## 📅 2026-01-19 (Late Evening Part 6) - Documentation Structure Cleanup 📚
 
 **Goal**: Establish sustainable documentation structure with enforcement

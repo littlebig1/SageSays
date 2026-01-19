@@ -2,7 +2,8 @@
 
 > **Last Updated**: 2026-01-19  
 > **Current Version**: v1.2.0  
-> **Next Target**: v1.3.0 - Learning from User Corrections
+> **Next Target**: v1.3.0 - Learning from User Corrections  
+> **Parallel Track**: Phase 7.1 - Testing Quick Wins (optional, recommended before Phase 4)
 
 ---
 
@@ -331,6 +332,493 @@ npx tsx scripts/test-semantic-detection.ts
 
 ---
 
+## 📋 Phase 8: Performance & Query Optimization (v2.1.0)
+
+**Goal**: Intelligently handle query timeouts and optimize slow queries
+
+### 8.1 Smart Timeout Handling
+
+**Current Behavior**:
+- Query times out → Error shown → User stuck
+- No insight into why query is slow
+- No automatic optimization attempts
+
+**Proposed Flow**:
+
+```
+1. Query Execution
+   ↓
+2. Timeout Detected (> STATEMENT_TIMEOUT_MS)
+   ↓
+3. Run EXPLAIN on the query
+   ↓
+4. Analyze EXPLAIN Output (LLM-assisted)
+   - Detect: Full table scans on large tables
+   - Identify: Missing indexes
+   - Find: Inefficient joins or subqueries
+   - Check: Suboptimal query patterns
+   ↓
+5. Generate Optimized Query (LLM-assisted)
+   - Add better WHERE conditions
+   - Optimize JOIN order
+   - Simplify complex subqueries
+   - Add appropriate indexes in suggestion
+   ↓
+6. Present Options to User:
+   "⏱️ Query timed out after 10s. I analyzed the query and found:"
+   - Issue: Full table scan on 'orders' (5M rows)
+   - Suggestion: Add WHERE created_date >= ... to reduce dataset
+   
+   Options:
+   a) Try optimized query (recommended)
+   b) Extend timeout to 30s and retry original
+   c) Simplify question and try again
+   d) Cancel
+   ↓
+7. User Selects Option
+   ↓
+8a. Option A: Execute Optimized Query
+    - Show both queries side-by-side
+    - Execute with extended timeout (2x original)
+    - If successful → Offer to save as semantic pattern
+    ↓
+8b. Option B: Retry with Extended Timeout
+    - Increase timeout temporarily
+    - Re-execute original query
+    - Warn about performance implications
+    ↓
+9. If Still Times Out:
+   - Show EXPLAIN plan comparison
+   - Suggest specific indexes:
+     CREATE INDEX idx_orders_date ON orders(created_date);
+   - Offer to break into smaller queries
+   - Save as "difficult query" for learning
+```
+
+**Tasks**:
+- [ ] **Create `QueryOptimizer` class** (`src/tools/queryOptimizer.ts`)
+  - [ ] `runExplain(sql: string): Promise<ExplainOutput>`
+  - [ ] `analyzeExplainPlan(explain: ExplainOutput): OptimizationInsights`
+  - [ ] `generateOptimizedQuery(sql, insights, schema): Promise<string>`
+  - [ ] `compareQueries(original, optimized): ComparisonReport`
+
+- [ ] **Extend Database Tools** (`src/tools/db.ts`)
+  - [ ] Add EXPLAIN query support
+  - [ ] Add query cancellation support
+  - [ ] Track query execution times
+  - [ ] Add timeout extension capability
+
+- [ ] **Update Orchestrator** (`src/agent/orchestrator.ts`)
+  - [ ] Catch timeout errors gracefully
+  - [ ] Trigger optimization workflow
+  - [ ] Present options to user
+  - [ ] Handle user choice
+  - [ ] Retry with optimized query
+
+- [ ] **Add CLI Commands**
+  - [ ] `/explain <query>` - Show EXPLAIN plan
+  - [ ] `/optimize` - Re-optimize last timed-out query
+  - [ ] `/timeout <seconds>` - Adjust timeout threshold
+
+- [ ] **LLM Prompts for Optimization**
+  - [ ] Prompt to analyze EXPLAIN output
+  - [ ] Prompt to generate optimized query
+  - [ ] Include table size information
+  - [ ] Include available indexes
+  - [ ] Include query patterns from semantics
+
+**Estimated Effort**: 6-8 hours
+
+---
+
+### 8.2 Proactive Performance Analysis
+
+**Tasks**:
+- [ ] **Query Complexity Scoring**
+  - [ ] Estimate complexity before execution
+  - [ ] Warn user if query likely to be slow
+  - [ ] Suggest simplifications upfront
+
+- [ ] **Table Statistics Integration**
+  - [ ] Query pg_stats for table sizes
+  - [ ] Get row count estimates
+  - [ ] Include in optimization decisions
+
+- [ ] **Index Recommendations**
+  - [ ] Analyze common query patterns
+  - [ ] Suggest missing indexes
+  - [ ] Generate CREATE INDEX statements
+  - [ ] Track which indexes would help most queries
+
+- [ ] **Query Plan Caching**
+  - [ ] Cache EXPLAIN results for similar queries
+  - [ ] Detect pattern changes (new data, schema changes)
+  - [ ] Invalidate cache when needed
+
+**Estimated Effort**: 4-5 hours
+
+---
+
+### 8.3 Performance Monitoring & Learning
+
+**Tasks**:
+- [ ] **Track Query Performance** (extend `run_logs`)
+  - [ ] Add `execution_time_ms` field
+  - [ ] Add `timeout_occurred` boolean
+  - [ ] Add `optimization_applied` boolean
+  - [ ] Add `explain_plan` JSONB field
+  - [ ] Add `optimization_details` JSONB field
+
+- [ ] **Learn from Optimizations**
+  - [ ] Save successful optimizations as semantic patterns
+  - [ ] Create "performance semantics" category
+  - [ ] Example: "Revenue queries should filter by date_range first"
+  - [ ] Example: "Order item queries should JOIN states table efficiently"
+
+- [ ] **Performance Dashboard Data**
+  - [ ] Average query execution time
+  - [ ] Timeout rate
+  - [ ] Optimization success rate
+  - [ ] Most expensive queries
+  - [ ] Most improved queries
+
+**Estimated Effort**: 3-4 hours
+
+---
+
+### 8.4 Advanced Optimization Strategies
+
+**Tasks**:
+- [ ] **Query Splitting**
+  - [ ] Detect queries that are too broad
+  - [ ] Suggest breaking into multiple steps
+  - [ ] Offer to run in parallel
+  - [ ] Combine results intelligently
+
+- [ ] **Materialized View Suggestions**
+  - [ ] Detect repeated expensive queries
+  - [ ] Suggest creating materialized views
+  - [ ] Generate CREATE MATERIALIZED VIEW statements
+
+- [ ] **Query Result Caching**
+  - [ ] Cache results for expensive queries
+  - [ ] Invalidation strategy based on data freshness
+  - [ ] Show cached result age to user
+
+**Estimated Effort**: 4-6 hours
+
+---
+
+### Success Criteria
+
+- ✅ **Timeout Handling**: 
+  - 90%+ of timed-out queries successfully optimized
+  - User always has clear options when timeout occurs
+  
+- ✅ **Query Performance**:
+  - Average query execution time < 5 seconds
+  - < 5% timeout rate
+  
+- ✅ **Learning**:
+  - Performance optimizations saved as semantics
+  - Future similar queries benefit automatically
+  
+- ✅ **User Experience**:
+  - Clear explanations of why queries are slow
+  - Actionable suggestions for improvement
+  - Transparent performance insights
+
+**Total Estimated Effort**: 17-23 hours (can be done incrementally)
+
+---
+
+## 📋 Phase 7: Testing Infrastructure (v1.x.x - Ongoing)
+
+**Goal**: Improve test coverage and refactor architecture for better testability
+
+**Current Status**: ~5-10% test coverage (only Guard unit tests)
+
+### 7.1 Quick Win Tests (No Refactoring Required)
+
+**Priority**: HIGH - Can implement immediately
+
+**Tasks**:
+- [ ] **Semantic Detection Tests** (`src/tools/semantics.ts`)
+  - [ ] Test `detectSemantics()` word boundary matching
+  - [ ] Test synonym detection (e.g., "revenue" = "sales")
+  - [ ] Test plural forms (e.g., "order" vs "orders")
+  - [ ] Test abbreviations (e.g., "rev" = "revenue")
+  - [ ] Test case-insensitive matching
+  - [ ] Test edge cases (no matches, multiple matches)
+
+- [ ] **Retry Logic Tests** (`src/utils/retry.ts`)
+  - [ ] Test exponential backoff calculation
+  - [ ] Test max retries enforcement (stops at 3)
+  - [ ] Test initial delay (1000ms default)
+  - [ ] Test max delay cap (10000ms)
+  - [ ] Test retryable errors (503, network timeout)
+  - [ ] Test non-retryable errors (401, 400)
+  - [ ] Test successful retry after transient failure
+
+- [ ] **Confidence Logic Tests** (`src/types.ts`)
+  - [ ] Test `confidenceToPercentage()` mapping
+    - [ ] 'high' → 95%
+    - [ ] 'medium' → 70%
+    - [ ] 'low' → 40%
+  - [ ] Test `meetsConfidenceThreshold()` logic
+    - [ ] high (95%) meets threshold 95% → true
+    - [ ] medium (70%) meets threshold 95% → false
+    - [ ] high (95%) meets threshold 50% → true
+
+- [ ] **Schema Formatting Tests** (`src/tools/schema.ts`)
+  - [ ] Test `formatSchemaForLLM()` output structure
+  - [ ] Test handling of tables with no columns
+  - [ ] Test handling of empty schema array
+
+- [ ] **Semantic Formatting Tests** (`src/tools/semantics.ts`)
+  - [ ] Test `formatSemanticsForLLM()` output structure
+  - [ ] Test grouping by category
+  - [ ] Test empty semantics array (returns empty string)
+  - [ ] Test semantic with all fields populated
+  - [ ] Test semantic with minimal fields
+
+- [ ] **Dynamic Confidence Scoring** (`src/agent/sqlWriter.ts`, `src/agent/orchestrator.ts`)
+  - **Current Issue**: Confidence is hardcoded to 'medium' (70%) in orchestrator
+  - **Goal**: Get real confidence from LLM during SQL generation
+  - [ ] Update SQL Writer prompt to request confidence rating
+    - HIGH: Clear semantics and table mappings available
+    - MEDIUM: Reasonable guess based on schema
+    - LOW: Uncertain about interpretation
+  - [ ] Parse confidence from SQL Writer response
+    - Expect format: `{ sql: "...", confidence: "high" }`
+  - [ ] Pass actual confidence to `requestPermission()` callback
+  - [ ] Test SMART mode with various confidence levels
+  - [ ] Verify threshold logic works correctly with dynamic confidence
+
+**Estimated Effort**: 3-4 hours (including dynamic confidence)  
+**No Breaking Changes**: ✅ Safe to implement anytime
+
+---
+
+### 7.2 Architecture Refactoring for Testability
+
+**Priority**: MEDIUM - Do after Phase 3 stabilizes
+
+**Current Problems**:
+- ❌ Hard-coded dependencies (can't inject mocks)
+- ❌ Direct database access (can't mock queries)
+- ❌ Global config singleton (can't override in tests)
+- ❌ No interfaces/abstractions (tight coupling)
+- ❌ Tests require real API keys and databases (slow, expensive, flaky)
+
+**Tasks**:
+
+#### 7.2.1 Dependency Injection Pattern
+- [ ] **Refactor Agent Classes** (Planner, SQLWriter, Interpreter)
+  ```typescript
+  // BEFORE (hard-coded)
+  export class Planner {
+    constructor() {
+      this.genAI = new GoogleGenerativeAI(config.geminiApiKey);
+    }
+  }
+  
+  // AFTER (injectable)
+  export class Planner {
+    constructor(
+      private llmClient: LLMClient,
+      private schemaFormatter: SchemaFormatter,
+      private semanticsService: SemanticsService
+    ) {}
+  }
+  ```
+
+- [ ] **Refactor Orchestrator**
+  ```typescript
+  // BEFORE
+  export class Orchestrator {
+    constructor() {
+      this.planner = new Planner();
+      this.sqlWriter = new SQLWriter();
+    }
+  }
+  
+  // AFTER
+  export class Orchestrator {
+    constructor(
+      private planner: IPlanner,
+      private sqlWriter: ISQLWriter,
+      private interpreter: IInterpreter
+    ) {}
+  }
+  ```
+
+#### 7.2.2 Extract Interfaces
+- [ ] Create `IPlanner` interface
+  - [ ] `createPlan(question, schema, previousSteps?): Promise<Plan>`
+- [ ] Create `ISQLWriter` interface
+  - [ ] `generateSQL(question, step, schema, context?): Promise<string>`
+- [ ] Create `IInterpreter` interface
+  - [ ] `interpret(question, step, result, allSteps, completed): Promise<Interpretation>`
+- [ ] Create `ILLMClient` interface
+  - [ ] `generateContent(prompt): Promise<string>`
+  - [ ] Enables mocking LLM responses
+
+#### 7.2.3 Database Layer Abstraction
+- [ ] Create `SemanticsRepository` class
+  ```typescript
+  export class SemanticsRepository {
+    constructor(private pool: pg.Pool) {}
+    async getSemantics(): Promise<Semantic[]> { /* ... */ }
+    async saveSemantic(data: SemanticEntity): Promise<void> { /* ... */ }
+    async detectSemantics(question: string): Promise<string[]> { /* ... */ }
+  }
+  ```
+
+- [ ] Create `LogsRepository` class
+  ```typescript
+  export class LogsRepository {
+    constructor(private pool: pg.Pool) {}
+    async saveRunLog(data: RunLogData): Promise<RunLog> { /* ... */ }
+    async getRecentRunLogs(limit: number): Promise<RunLog[]> { /* ... */ }
+  }
+  ```
+
+- [ ] Create mock implementations for testing
+  - [ ] `MockSemanticsRepository`
+  - [ ] `MockLogsRepository`
+
+#### 7.2.4 Config Injection
+- [ ] Replace global `config` with injected configuration
+- [ ] Create `ConfigProvider` class
+- [ ] Allow test config override
+
+**Estimated Effort**: 4-6 hours  
+**Breaking Changes**: ⚠️ Major refactoring, high risk
+
+**Recommendation**: Do this refactoring AFTER Phase 3 is stable and working
+
+---
+
+### 7.3 Integration Tests
+
+**Priority**: MEDIUM - After 7.2 refactoring
+
+**Tasks**:
+- [ ] **End-to-End Flow Tests**
+  - [ ] Test full question → answer flow (with mocked LLM)
+  - [ ] Test multi-step query execution
+  - [ ] Test error handling and retry logic
+  - [ ] Test debug mode flows (on/off/smart)
+  - [ ] Test SMART mode confidence checks
+
+- [ ] **SMART Mode Tests**
+  - [ ] Test auto-execution when semantics detected + high confidence
+  - [ ] Test permission request when no semantics
+  - [ ] Test permission request when confidence < threshold
+  - [ ] Test cancellation and context reset
+
+- [ ] **CLI Command Tests**
+  - [ ] Test `/show-schema` command
+  - [ ] Test `/show-semantics` command
+  - [ ] Test `/refresh-schema` command
+  - [ ] Test `/debug on|off|smart` command
+  - [ ] Test `/help` command
+  - [ ] Test `/exit` command
+
+- [ ] **Database Integration Tests**
+  - [ ] Test schema loading from real database
+  - [ ] Test semantic retrieval with various filters
+  - [ ] Test run log saving and retrieval
+  - [ ] Test connection pooling and cleanup
+
+**Estimated Effort**: 3-4 hours  
+**Dependencies**: Requires 7.2 refactoring for effective mocking
+
+---
+
+### 7.4 Test Automation & CI/CD
+
+**Priority**: LOW - Future enhancement
+
+**Tasks**:
+- [ ] **Add tests to validate command**
+  ```json
+  "validate": "npm run typecheck && npm run build && npm test"
+  ```
+
+- [ ] **Set up GitHub Actions**
+  - [ ] Run tests on every push
+  - [ ] Run tests on pull requests
+  - [ ] Block merge if tests fail
+  - [ ] Generate coverage reports
+
+- [ ] **Test Coverage Reporting**
+  - [ ] Integrate `vitest --coverage`
+  - [ ] Set coverage thresholds (start with 50%, increase over time)
+  - [ ] Display coverage badges in README
+
+- [ ] **Performance Testing**
+  - [ ] Test query execution time
+  - [ ] Test LLM response time
+  - [ ] Test database connection time
+  - [ ] Set performance budgets
+
+- [ ] **Load Testing**
+  - [ ] Test concurrent query handling
+  - [ ] Test connection pool limits
+  - [ ] Test retry logic under load
+
+**Estimated Effort**: 2-3 hours  
+**Dependencies**: Requires good test coverage first
+
+---
+
+### 7.5 Test Coverage Milestones
+
+**Current**: ~5-10% (only Guard tests)
+
+**Milestone 1** (Quick Wins - 7.1):
+- Target: 25-30% coverage
+- Components: Guard, Retry, Confidence, Formatting, Detection
+- Timeline: Before Phase 4
+
+**Milestone 2** (After Refactoring - 7.2 + 7.3):
+- Target: 60-70% coverage
+- Components: All agents, orchestrator, repositories
+- Timeline: After Phase 3 stabilizes
+
+**Milestone 3** (Full Coverage - 7.4):
+- Target: 80-90% coverage
+- Components: Everything + integration tests
+- Timeline: v2.0.0
+
+---
+
+### Success Criteria
+
+- ✅ **Phase 7.1 Complete**: 
+  - 25%+ test coverage
+  - All pure functions tested
+  - Tests run in < 5 seconds
+
+- ✅ **Phase 7.2 Complete**:
+  - All dependencies injectable
+  - All components have interfaces
+  - Can test without API keys/databases
+
+- ✅ **Phase 7.3 Complete**:
+  - 60%+ test coverage
+  - Integration tests for critical flows
+  - Tests run in < 30 seconds
+
+- ✅ **Phase 7.4 Complete**:
+  - Tests run in CI/CD
+  - Coverage reports generated
+  - Performance benchmarks established
+
+---
+
 ## 💡 Ideas for Future Exploration
 
 ### LLM Abstraction Layer (Deferred)
@@ -344,11 +832,6 @@ npx tsx scripts/test-semantic-detection.ts
 - MySQL adapter
 - SQLite for local dev
 - Clickhouse for analytics
-
-### Query Optimization
-- Explain plan analysis
-- Index suggestions
-- Performance monitoring
 
 ### Natural Language Interface
 - More conversational
@@ -376,6 +859,12 @@ npx tsx scripts/test-semantic-detection.ts
 - [ ] Complex logic rules working correctly
 - [ ] Anti-pattern detection rate > 90%
 
+### Phase 8 Success:
+- [ ] 90%+ of timed-out queries successfully optimized
+- [ ] Average query execution time < 5 seconds
+- [ ] Timeout rate < 5%
+- [ ] Performance optimizations saved as reusable semantics
+
 ### Overall Success:
 - [ ] Query accuracy > 95%
 - [ ] User satisfaction high
@@ -388,6 +877,25 @@ npx tsx scripts/test-semantic-detection.ts
 - **Weekly**: Update progress, add notes
 - **Monthly**: Review priorities, adjust roadmap
 - **Quarterly**: Major version planning
+
+---
+
+---
+
+## 🧪 Testing Strategy Note
+
+**Current Approach**: Manual testing + minimal unit tests (Guard only)  
+**Rationale**: During Phases 1-3, we're in rapid prototyping mode. Manual testing is sufficient.
+
+**Future Approach**: After Phase 3 stabilizes, implement Phase 7 testing improvements:
+1. **Phase 7.1 (Quick Wins)**: Add tests for pure functions - **DO THIS FIRST** (2-3 hours)
+2. **Phase 7.2 (Refactoring)**: Refactor for dependency injection - **DO AFTER Phase 3 stabilizes** (4-6 hours)
+3. **Phase 7.3 (Integration)**: Add end-to-end tests - **DO AFTER 7.2** (3-4 hours)
+4. **Phase 7.4 (Automation)**: Set up CI/CD - **DO WHEN stable** (2-3 hours)
+
+**Recommended Timeline**:
+- Phase 7.1: Before Phase 4 (improve confidence in complex logic)
+- Phase 7.2-7.4: After Phase 5 (when architecture is stable)
 
 ---
 
