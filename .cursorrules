@@ -1,0 +1,67 @@
+# SageSays Cursor Rules
+
+## Documentation Structure - The 5+1 Rule
+
+We maintain EXACTLY these documentation files:
+- `/README.md` - Setup guide for new developers (< 300 lines)
+- `/docs/ARCHITECTURE.md` - Technical design, flows, modules
+- `/docs/ROADMAP.md` - Long-term vision and plans
+- `/docs/SESSION_NOTES.md` - Session-by-session logs
+- `/docs/CONTROL_DB_SCHEMA.md` - Database schema reference
+- `/docs/DEVELOPMENT.md` - Contributing guide, patterns
+
+## NEVER create:
+- Feature-specific docs (use ARCHITECTURE.md sections instead)
+- `/docs/README.md` (redundant index)
+- Phase summaries (use SESSION_NOTES.md)
+- Separate feature guides (consolidate into ARCHITECTURE.md)
+
+## ALWAYS update:
+- `SESSION_NOTES.md` after every session (add at top)
+- `ARCHITECTURE.md` when adding features (add section)
+- `ROADMAP.md` when planning future work
+- `CONTROL_DB_SCHEMA.md` when schema changes
+- `DEVELOPMENT.md` when adding patterns
+
+## Code Quality Standards
+
+### TypeScript
+- Use strict mode
+- No `any` types
+- Proper error handling with typed catch blocks
+- JSDoc comments for public functions
+
+### Testing
+- Write tests for new features
+- All tests must pass before committing
+- Use `npm run validate` before pushing
+
+### Commits
+- Follow conventional commits format
+- Run `npm run validate` before committing
+- Never skip hooks (--no-verify)
+- Never force push to main
+
+## Project-Specific Rules
+
+### Semantic Learning
+- All semantics go in control database
+- Never hardcode business logic
+- Document new semantics in CONTROL_DB_SCHEMA.md
+
+### Debug Mode
+- Default is SMART mode
+- Always show SQL for transparency
+- Respect confidence thresholds
+
+### Database
+- Read-only user for inspected database
+- Control database is optional
+- Always use connection pooling
+
+## Architecture Principles
+
+1. **Separation of Concerns**: Each agent has one role
+2. **Safety First**: Validate all SQL, use Guard
+3. **Transparency**: Always show what's being executed
+4. **Learning**: Track all interactions for improvement

@@ -1,0 +1,40 @@
+{
+  "name": "sql-agent",
+  "version": "1.2.0",
+  "description": "Level-2 agentic SQL assistant CLI using Gemini with semantic learning",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
+    "validate": "npm run typecheck && npm run build",
+    "precommit": "npm run validate",
+    "show-schema": "npx tsx scripts/show-current-schema.ts"
+  },
+  "keywords": [
+    "sql",
+    "ai",
+    "cli",
+    "gemini"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "dotenv": "^16.4.5",
+    "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.5",
+    "@types/pg": "^8.10.9",
+    "@vitest/ui": "^4.0.17",
+    "tsx": "^4.7.1",
+    "typescript": "^5.3.3",
+    "vitest": "^4.0.17"
+  }
+}
