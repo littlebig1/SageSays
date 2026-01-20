@@ -15,6 +15,7 @@ export interface ParsedSQL {
   tables: string[];
   columns: Array<{ table?: string; column: string }>;
   joins: Array<{ from: string; to: string; condition: string }>;
+  cteNames: Set<string>; // CTE names for validation skipping
   grain?: GrainLevel;
   hasAggregations: boolean;
   hasGroupBy: boolean;
@@ -24,44 +25,116 @@ export interface ParsedSQL {
  * Parse SQL query to extract structural elements
  */
 export function parseSQL(sql: string): ParsedSQL {
-  const normalized = sql.replace(/\s+/g, ' ').trim();
+  // Remove SQL comments first (-- and /* */)
+  let cleaned = sql.replace(/--[^\n]*/g, ''); // Remove -- comments
+  cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, ''); // Remove /* */ comments
+  const normalized = cleaned.replace(/\s+/g, ' ').trim();
   
-  // Extract table names from FROM and JOIN clauses
-  const tables: string[] = [];
-  const fromMatch = normalized.match(/\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)/i);
-  if (fromMatch) {
-    tables.push(fromMatch[1]);
-  }
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/dd8d4512-6558-4f07-82a0-826080c144b8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'sqlValidator.ts:26',message:'parseSQL entry',data:{sql:sql.substring(0,200),normalized:normalized.substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'E'})}).catch(()=>{});
+  // #endregion
   
-  // Extract JOIN tables
-  const joinMatches = normalized.matchAll(/\b(?:INNER|LEFT|RIGHT|FULL|CROSS)?\s*JOIN\s+([a-zA-Z_][a-zA-Z0-9_]*)/gi);
-  for (const match of joinMatches) {
-    if (match[1] && !tables.includes(match[1])) {
-      tables.push(match[1]);
+  // Extract CTE names from WITH clauses
+  const cteNames = new Set<string>();
+  const withMatches = normalized.matchAll(/\bWITH\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+AS\s*\(/gi);
+  for (const match of withMatches) {
+    if (match[1]) {
+      cteNames.add(match[1].toLowerCase());
     }
   }
   
-  // Extract columns from SELECT clause
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/dd8d4512-6558-4f07-82a0-826080c144b8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'sqlValidator.ts:38',message:'CTEs detected',data:{cteNames:Array.from(cteNames)},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'E'})}).catch(()=>{});
+  // #endregion
+  
+  // Extract table names and aliases from FROM and JOIN clauses
+  const tables: string[] = [];
+  const tableAliases = new Map<string, string>(); // alias -> actual table name
+  
+  // Extract FROM clause with optional alias: FROM table_name [alias] or FROM table_name AS alias
+  // Must be after SELECT or after a closing paren (for subqueries/CTEs)
+  const fromMatch = normalized.match(/\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s+(?:AS\s+)?([a-zA-Z_][a-zA-Z0-9_]*))?/i);
+  if (fromMatch) {
+    const tableName = fromMatch[1];
+    const alias = fromMatch[2];
+    // Validate table name is not a SQL keyword or common word
+    const sqlKeywords = new Set(['the', 'a', 'an', 'this', 'that', 'these', 'those', 'select', 'where', 'group', 'order', 'having', 'limit', 'offset']);
+    if (!sqlKeywords.has(tableName.toLowerCase())) {
+      tables.push(tableName);
+      if (alias && alias.toLowerCase() !== tableName.toLowerCase()) {
+        tableAliases.set(alias, tableName);
+      }
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/dd8d4512-6558-4f07-82a0-826080c144b8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'sqlValidator.ts:50',message:'FROM table extracted',data:{tableName,alias},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'E'})}).catch(()=>{});
+      // #endregion
+    } else {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/dd8d4512-6558-4f07-82a0-826080c144b8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'sqlValidator.ts:56',message:'FROM table filtered as keyword',data:{tableName},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'E'})}).catch(()=>{});
+      // #endregion
+    }
+  }
+  
+  // Extract JOIN tables with optional aliases: JOIN table_name [alias] or JOIN table_name AS alias
+  const joinMatches = normalized.matchAll(/\b(?:INNER|LEFT|RIGHT|FULL|CROSS)?\s*JOIN\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s+(?:AS\s+)?([a-zA-Z_][a-zA-Z0-9_]*))?/gi);
+  for (const match of joinMatches) {
+    const tableName = match[1];
+    const alias = match[2];
+    // Validate table name is not a SQL keyword or common word
+    const sqlKeywords = new Set(['the', 'a', 'an', 'this', 'that', 'these', 'those', 'select', 'where', 'group', 'order', 'having', 'limit', 'offset']);
+    if (tableName && !sqlKeywords.has(tableName.toLowerCase()) && !tables.includes(tableName)) {
+      tables.push(tableName);
+    }
+    if (alias && alias.toLowerCase() !== tableName.toLowerCase()) {
+      tableAliases.set(alias, tableName);
+    }
+  }
+  
+  // Extract columns from SELECT, WHERE, GROUP BY, ORDER BY clauses
   const columns: Array<{ table?: string; column: string }> = [];
+  
+  // Helper function to extract table.column references from a clause
+  const extractTableColumns = (clause: string) => {
+    // Match table.column patterns (handles aliases and CTEs)
+    const tableColPattern = /([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)/g;
+    let match;
+    while ((match = tableColPattern.exec(clause)) !== null) {
+      const tableRef = match[1];
+      const columnName = match[2];
+      
+      // Check if this is a CTE - if so, skip validation (CTEs are virtual tables)
+      if (cteNames.has(tableRef.toLowerCase())) {
+        // CTE column - don't validate against schema, but still track it
+        columns.push({
+          table: tableRef, // Keep CTE name as-is
+          column: columnName,
+        });
+        continue;
+      }
+      
+      // Resolve alias to actual table name
+      const actualTable = tableAliases.get(tableRef) || tableRef;
+      
+      columns.push({
+        table: actualTable,
+        column: columnName,
+      });
+    }
+  };
+  
+  // Extract from SELECT clause
   const selectMatch = normalized.match(/\bSELECT\s+(.+?)\s+FROM/i);
   if (selectMatch) {
     const selectClause = selectMatch[1];
     
     // Skip SELECT * case (will be caught by guard)
     if (!selectClause.includes('*')) {
-      // Split by comma and extract column names
-      const columnParts = selectClause.split(',').map(c => c.trim());
+      extractTableColumns(selectClause);
       
+      // Also handle unqualified columns in SELECT
+      const columnParts = selectClause.split(',').map(c => c.trim());
       for (const part of columnParts) {
-        // Handle table.column format
-        const tableColMatch = part.match(/([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)/);
-        if (tableColMatch) {
-          columns.push({
-            table: tableColMatch[1],
-            column: tableColMatch[2],
-          });
-        } else {
-          // Just column name (may have alias)
+        // Skip if already matched as table.column
+        if (!part.includes('.')) {
           const colMatch = part.match(/([a-zA-Z_][a-zA-Z0-9_]*)/);
           if (colMatch && !['COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'DISTINCT'].includes(colMatch[1].toUpperCase())) {
             columns.push({ column: colMatch[1] });
@@ -69,6 +142,24 @@ export function parseSQL(sql: string): ParsedSQL {
         }
       }
     }
+  }
+  
+  // Extract from WHERE clause
+  const whereMatch = normalized.match(/\bWHERE\s+(.+?)(?:\s+GROUP\s+BY|\s+ORDER\s+BY|\s+HAVING|\s+LIMIT|$)/i);
+  if (whereMatch) {
+    extractTableColumns(whereMatch[1]);
+  }
+  
+  // Extract from GROUP BY clause
+  const groupByMatch = normalized.match(/\bGROUP\s+BY\s+(.+?)(?:\s+ORDER\s+BY|\s+HAVING|\s+LIMIT|$)/i);
+  if (groupByMatch) {
+    extractTableColumns(groupByMatch[1]);
+  }
+  
+  // Extract from ORDER BY clause
+  const orderByMatch = normalized.match(/\bORDER\s+BY\s+(.+?)(?:\s+LIMIT|$)/i);
+  if (orderByMatch) {
+    extractTableColumns(orderByMatch[1]);
   }
   
   // Extract JOIN relationships
@@ -122,10 +213,15 @@ export function parseSQL(sql: string): ParsedSQL {
     grain = 'row_level';
   }
   
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/dd8d4512-6558-4f07-82a0-826080c144b8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'sqlValidator.ts:200',message:'parseSQL exit',data:{tables,cteNames:Array.from(cteNames),columnsCount:columns.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'E'})}).catch(()=>{});
+  // #endregion
+  
   return {
     tables,
     columns,
     joins,
+    cteNames,
     grain,
     hasAggregations,
     hasGroupBy,
@@ -154,11 +250,21 @@ export function validateAgainstMetadata(
   const metadataTableNames = new Set(metadata.map(m => m.tableName));
   const missingTables: string[] = [];
   
-  for (const table of parsed.tables) {
+  // Filter out CTE names from table validation (CTEs are virtual tables)
+  const realTables = parsed.tables.filter(table => !parsed.cteNames.has(table.toLowerCase()));
+  
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/dd8d4512-6558-4f07-82a0-826080c144b8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'sqlValidator.ts:232',message:'Validating tables',data:{allTables:parsed.tables,realTables,cteNames:Array.from(parsed.cteNames),metadataTables:Array.from(metadataTableNames).slice(0,10)},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'E'})}).catch(()=>{});
+  // #endregion
+  
+  for (const table of realTables) {
     if (!metadataTableNames.has(table)) {
       missingTables.push(table);
       tablesValidated = false;
       confidence -= 0.2;
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/dd8d4512-6558-4f07-82a0-826080c144b8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'sqlValidator.ts:242',message:'Table not found',data:{table,isCTE:parsed.cteNames.has(table.toLowerCase())},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'E'})}).catch(()=>{});
+      // #endregion
     } else {
       facts.push(`Table "${table}" exists in metadata`);
     }
@@ -178,7 +284,14 @@ export function validateAgainstMetadata(
   
   for (const col of parsed.columns) {
     if (col.table) {
-      // Table-qualified column
+      // Check if this is a CTE - CTEs are virtual tables, skip schema validation
+      if (parsed.cteNames.has(col.table.toLowerCase())) {
+        // CTE column - assume valid (defined in query itself)
+        assumptions.push(`Column "${col.table}.${col.column}" from CTE (assumed valid)`);
+        continue; // Skip validation for CTE columns
+      }
+      
+      // Table-qualified column - validate against schema
       const tableSchema = schemaMap.get(col.table);
       if (!tableSchema) {
         missingColumns.push({ table: col.table, column: col.column });

@@ -3,18 +3,19 @@
 High-level architecture and design decisions for SageSays.
 
 **Last Updated**: 2026-01-20
-**Current Version**: v1.3.6
-**Architecture Maturity**: Level-2 Agentic System with Learning Capabilities
+**Current Version**: v1.3.7
+**Architecture Maturity**: Level-2 Agentic System with LLM-Interpreted Orchestration & Learning Capabilities
 
 ## Overview
 
-SageSays is a **Level-2 agentic system** with **learning capabilities** that converts natural language questions into safe SQL queries, executes them, and continuously improves through user corrections.
+SageSays is a **Level-2 agentic system** with **LLM-interpreted orchestration** and **learning capabilities** that converts natural language questions into safe SQL queries, executes them, and continuously improves through user corrections.
 
 **Level-2 Agentic System** means:
 - Multiple specialized roles (Planner, SQL Writer, Interpreter, Guard, SemanticLearner)
 - Multi-step query decomposition and execution
 - Self-refinement based on intermediate results
 - Context preservation across steps
+- **Intelligent orchestration**: Agents express needs, LLM interprets and decides next actions (not hardcoded rules)
 
 **Learning System** features:
 - **Semantic Knowledge Base**: Stores business logic, domain concepts, and calculation rules
@@ -89,41 +90,143 @@ SageSays is a **Level-2 agentic system** with **learning capabilities** that con
 
 ### 1. Orchestrator (`orchestrator.ts`)
 
-**Responsibility**: Main workflow coordination
+**Responsibility**: Main workflow coordination using a hierarchical state machine with **LLM-interpreted orchestration**
+
+**Architecture**: Mode-Based State Machine with Intelligent Decision Making
+- **MODE level**: QUERY, DISCOVERY, SEMANTIC_STORING (tracked independently)
+- **SUB-STATE level**: Each MODE has its own sub-states (NULL = terminated/done)
+- **Active MODE**: `activeMode` field indicates which MODE is currently executing
+- **Termination Logic**: When `activeMode`'s sub-state becomes NULL, check other modes for activation
+- **Completion**: Only when ALL modes are NULL (all terminated) do we stop
+- **Decision Making**: **LLM-based intelligent orchestration** - agents express needs, LLM decides next action
+
+**State Structure**:
+```typescript
+interface OrchestratorState {
+  activeMode: Mode | null;            // Currently executing MODE
+  queryState: QuerySubState;          // PLAN | CLARIFICATION | EXECUTE | INTERPRET | ANSWER | null
+  discoveryState: DiscoverySubState;   // GET_DATA | ANALYZE | VALIDATE | SUGGEST | APPROVE | STORE | null
+  semanticStoringState: SemanticStoringSubState; // VALIDATE | APPROVE | STORE | null
+  context: ExecutionContext;           // Shared context across modes
+  agentNeeds?: AgentNeeds;             // Agent needs/intentions for LLM interpretation
+  lastDecision?: OrchestrationDecision; // Last LLM decision made
+  decisionHistory?: OrchestrationDecision[]; // History of decisions for debugging/learning
+}
+```
+
+**State Semantics**:
+- **NULL sub-state** = MODE is terminated/done (no further action), NOT suspended
+- **State Preservation**: When switching modes, previous mode's sub-state is preserved until it naturally terminates
+- **Mode Activation**: When `activeMode` becomes null, check other modes to find next one to activate
+
+**LLM-Interpreted Orchestration**:
+The Orchestrator uses **intelligent decision making** rather than hardcoded if/else logic:
+
+1. **Agents Express Needs**: Each agent (Planner, SQLWriter, Interpreter, etc.) analyzes its situation and expresses needs in `state.agentNeeds`:
+   ```typescript
+   agentNeeds: {
+     planner: {
+       needsDiscovery: { reason: "...", target: "orders", confidence: 0.7 },
+       needsClarification: true,
+       confidence: 0.6
+     },
+     sqlWriter: {
+       blockedBy: "Missing table metadata",
+       confidence: 0.5
+     },
+     interpreter: {
+       needsRefinement: { reason: "...", suggestedNextStep: "..." },
+       confidence: 0.8
+     }
+   }
+   ```
+
+2. **LLM Interprets State**: Orchestrator calls `decideNextAction()` which:
+   - Builds comprehensive prompt with current state, agent needs, and context
+   - Calls LLM to intelligently decide next action
+   - Validates decision (mode/sub-state combinations, guard constraints)
+   - Returns `OrchestrationDecision` with reasoning and confidence
+
+3. **Decision Applied**: `applyDecision()` updates state based on LLM's intelligent choice
 
 **Key Functions**:
-- `execute(question, requestPermission?)` - Main entry point
-  - Loads database schema
-  - Creates initial plan
-  - Executes plan steps
-  - Manages refinement loop (max 3 iterations)
-  - Saves run logs
+- `execute(question, requestPermission?)` - Main entry point for QUERY mode (backward compatible)
+- `executeDiscovery(question, context?, askQuestion?)` - Entry point for DISCOVERY mode
+- `initializeState(mode, question?, context?)` - Initialize state for a mode
+- `getActiveSubState(state)` - Get sub-state of currently active mode
+- `findNextActiveMode(state)` - Find next mode that needs activation
+- `selectNextAction(state)` - **LLM-based decision making** - interprets agent needs and decides next action
+- `decideNextAction(state)` - Core LLM decision logic
+- `buildDecisionPrompt(state, agentNeeds, ...)` - Formats comprehensive prompt for LLM
+- `validateDecision(decision, state)` - Validates LLM decision output
+- `applyDecision(state, decision)` - Applies LLM decision to state
+- `callTool(toolId, state, ...)` - Execute tool and return result
+- `shouldContinue(state)` - Check if execution should continue
+- `passesGuards(state, result)` - Validate guards (iteration limits, time limits, etc.)
 
-**Flow**:
-1. Load schema from inspected database
-2. Create plan via Planner
-3. For each step in plan:
-   - Generate SQL via SQL Writer
-   - Validate via Guard
-   - Request permission if debug mode
-   - Execute SQL
-   - Interpret results via Interpreter
-   - Decide: continue, refine, or finalize
-4. Save run log (if control DB configured)
+**QUERY Mode Flow**:
+1. Initialize: `queryState = 'PLAN'`, `activeMode = 'QUERY'`
+2. PLAN → Create plan via Planner (expresses needs in `state.agentNeeds.planner`)
+3. **LLM Decision** → Orchestrator interprets agent needs, decides next action
+4. CLARIFICATION → Handle clarification questions (if Planner needs clarification)
+5. EXECUTE → Generate SQL via SQLWriter (expresses needs in `state.agentNeeds.sqlWriter`), validate, execute
+6. **LLM Decision** → Orchestrator interprets needs, decides next action
+7. INTERPRET → Analyze results via Interpreter (expresses needs in `state.agentNeeds.interpreter`)
+8. **LLM Decision** → Orchestrator interprets needs, decides next action
+9. ANSWER → Final answer (terminates: `queryState = null`)
+10. If INTERPRET needs refinement → LLM decides to return to PLAN
+
+**DISCOVERY Mode Flow**:
+1. Initialize: `discoveryState = 'GET_DATA'`, `activeMode = 'DISCOVERY'`
+2. GET_DATA → Generate exploration query, execute
+3. ANALYZE → Analyze patterns via SemanticLearner.analyzePattern()
+4. VALIDATE → Run validation query (optional)
+5. SUGGEST → Create semantic suggestion
+6. APPROVE → Get user approval
+7. STORE → Store approved semantic (terminates: `discoveryState = null`)
+
+**Tool Routing**:
+- Based on `activeMode` + `subState` combination
+- QUERY + PLAN → Planner
+- QUERY + EXECUTE → SQLWriter + runSQL
+- QUERY + INTERPRET → Interpreter
+- DISCOVERY + GET_DATA → SQLWriter (exploration query)
+- DISCOVERY + ANALYZE → SemanticLearner.analyzePattern()
+- DISCOVERY + VALIDATE → SQLWriter (validation query)
+- DISCOVERY + SUGGEST → insertSuggestion()
+- DISCOVERY + APPROVE → User interaction
+- DISCOVERY + STORE → approveSuggestion()
 
 **Context Management**:
 - Maintains `previousResults` array for SQL Writer context
-- Passes executed steps to Interpreter for decision-making
-- Allows plan refinement based on intermediate results
+- Preserves state across mode switches
+- Shares `ExecutionContext` across all modes
+- Tracks `agentNeeds` for intelligent decision making
+- Maintains `decisionHistory` for debugging and learning
+
+**Agent Needs System**:
+Each agent autonomously expresses its needs/intentions in `state.agentNeeds`:
+
+- **Planner**: Needs clarification, needs discovery, missing context, confidence level
+- **SQLWriter**: Needs validation, needs optimization, blocked by issues, confidence level
+- **Interpreter**: Needs refinement, needs more data, completion status, confidence level
+- **Guard**: Validation issues, safety concerns, safety status
+- **Discovery**: Can help, suggested target, ready to explore
+
+The Orchestrator uses these needs to make intelligent decisions rather than following hardcoded rules.
 
 ---
 
 ### 2. Planner (`planner.ts`)
 
-**Responsibility**: Break down questions into step-by-step plans
+**Responsibility**: Break down questions into step-by-step plans and express needs
 
 **Key Functions**:
-- `createPlan(question, schema, previousSteps?)` - Generate execution plan
+- `createPlan(question, schema, previousSteps?, conversationHistory?, state?)` - Generate execution plan and express needs
+- `expressNeeds(plan, question, schema, state)` - Express planner needs in state
+- `analyzeContextGaps(plan, question, schema)` - Analyze if discovery is needed
+- `identifyMissingContext(plan, question, schema)` - Identify missing context items
+- `calculateConfidence(plan)` - Calculate confidence in the plan
 
 **Process**:
 1. Receives user question + database schema + semantics
@@ -151,10 +254,14 @@ SageSays is a **Level-2 agentic system** with **learning capabilities** that con
 
 ### 3. SQL Writer (`sqlWriter.ts`)
 
-**Responsibility**: Generate PostgreSQL SELECT queries
+**Responsibility**: Generate PostgreSQL SELECT queries and express needs
 
 **Key Functions**:
-- `generateSQL(step, question, schema, previousResults?)` - Generate SQL for a plan step
+- `generateSQL(step, question, schema, previousResults?, conversationHistory?, state?)` - Generate SQL and express needs
+- `expressNeeds(sql, step, schema, state)` - Express SQL writer needs in state
+- `analyzeOptimizationOpportunities(sql, schema)` - Analyze optimization needs
+- `identifyBlockers(sql, step, schema)` - Identify what's blocking SQL generation
+- `calculateConfidence(sql, step, schema)` - Calculate confidence in generated SQL
 
 **Process**:
 1. Receives plan step + schema + semantics + previous results
@@ -175,10 +282,13 @@ SageSays is a **Level-2 agentic system** with **learning capabilities** that con
 
 ### 4. Interpreter (`interpreter.ts`)
 
-**Responsibility**: Analyze results and decide next action
+**Responsibility**: Analyze results and decide next action, express needs
 
 **Key Functions**:
-- `interpret(question, step, result, allSteps, completedSteps)` - Analyze query results
+- `interpret(question, step, result, allSteps, completedSteps, state?)` - Analyze query results and express needs
+- `expressNeeds(interpretation, question, step, sqlResult, allSteps, completedSteps, state)` - Express interpreter needs
+- `identifyMissingData(interpretation, question, sqlResult, allSteps, completedSteps)` - Identify missing data
+- `confidenceToNumber(confidence)` - Convert confidence level to number
 
 **Output**:
 ```typescript

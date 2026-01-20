@@ -1,12 +1,13 @@
 # SQL Agent CLI - Level 2 Orchestration
 
-A complete, runnable CLI tool for querying PostgreSQL databases using Google Gemini with Level-2 agentic orchestration. The system uses a Planner, SQL Writer, and Interpreter to break down complex questions into multi-step SQL queries.
+A complete, runnable CLI tool for querying PostgreSQL databases using Google Gemini with **Level-2 agentic orchestration** and **LLM-interpreted decision making**. The system uses a Planner, SQL Writer, and Interpreter to break down complex questions into multi-step SQL queries, with intelligent orchestration that adapts to agent needs.
 
 ## Architecture
 
-- **Planner**: Breaks down user questions into step-by-step plans
-- **SQL Writer**: Generates PostgreSQL queries for each plan step
-- **Interpreter**: Analyzes query results and decides whether to continue or provide a final answer
+- **Orchestrator**: **LLM-interpreted orchestration** - agents express needs, LLM intelligently decides next actions
+- **Planner**: Breaks down user questions into step-by-step plans and expresses needs (discovery, clarification, context gaps)
+- **SQL Writer**: Generates PostgreSQL queries for each plan step and expresses needs (optimization, blockers)
+- **Interpreter**: Analyzes query results and expresses needs (refinement, missing data)
 - **Guard**: Validates SQL for safety (SELECT only, auto-LIMIT, timeouts)
 - **Control Database**: Stores business semantics and run logs separately from the inspected database
 
@@ -332,6 +333,12 @@ Or:
 - `/refresh-metadata` - Refresh table metadata (indexes, sizes, foreign keys) from inspected DB
 - `/show-schema [table]` - Show database schema (optionally filtered by table name)
 - `/show-semantics` - Show business semantics definitions
+- `/review-suggestions` - Review pending semantic suggestions for approval
+- `/explore <table> [column]` - Explore database schema to discover semantic patterns
+  - `table` - Table name to explore (required)
+  - `column` - Optional column name to explore
+  - Example: `/explore orders` or `/explore orders status`
+  - Discovers patterns in data and creates semantic suggestions
 - `/help` - Show help message
 - `/exit` or `/quit` - Exit the CLI
 

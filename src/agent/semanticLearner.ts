@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { CorrectionCapture, SemanticSuggestion, TableSchema } from '../types.js';
+import { CorrectionCapture, SemanticSuggestion, TableSchema, SQLResult, Discovery } from '../types.js';
 import { config } from '../config.js';
 import { formatSchemaForLLM } from '../tools/inspectedDb.js';
 import { retryWithBackoff } from '../utils/retry.js';
@@ -330,6 +330,160 @@ Generate suggestion:`;
     } catch (error) {
       console.error('❌ Error analyzing SQL diff:', error);
       return null;
+    }
+  }
+  
+  /**
+   * Analyze data patterns from exploration queries to discover semantic rules.
+   * Used in DISCOVERY mode for schema exploration.
+   * 
+   * @param data - SQL query result containing sample data
+   * @param schema - Database schema for context
+   * @param tableName - Table being explored
+   * @param columnName - Optional column being explored
+   * @returns Discovery object with detected patterns and suggested semantics
+   */
+  async analyzePattern(
+    data: SQLResult,
+    schema: TableSchema[],
+    tableName: string,
+    columnName?: string
+  ): Promise<Discovery> {
+    const schemaText = formatSchemaForLLM(schema);
+    const tableSchema = schema.find(t => t.tableName === tableName);
+    const columnSchema = columnName ? tableSchema?.columns.find(c => c.columnName === columnName) : undefined;
+    
+    // Limit data sent to LLM
+    const sampleRows = data.rows.slice(0, 20);
+    const sampleData = sampleRows.map((row) => {
+      const rowObj: Record<string, any> = {};
+      data.columns.forEach((col, colIdx) => {
+        rowObj[col] = row[colIdx];
+      });
+      return rowObj;
+    });
+    
+    const prompt = `You are a semantic discovery system. Analyze the sample data from a database table to identify patterns and infer semantic rules.
+
+CONTEXT:
+Database Schema:
+${schemaText}
+
+Table: ${tableName}
+${columnName ? `Column: ${columnName} (${columnSchema?.dataType || 'unknown type'})` : 'Exploring entire table'}
+
+Sample Data (${sampleRows.length} of ${data.rowCount} rows):
+${JSON.stringify(sampleData, null, 2)}
+
+TASK:
+Analyze the data patterns and identify semantic rules that could be learned:
+
+1. **Data Patterns**: What patterns do you see in the data?
+   - Value distributions (e.g., status values, date ranges, numeric ranges)
+   - Relationships between columns
+   - Common value sets or enumerations
+   - Business logic indicators (e.g., active/inactive flags, date-based rules)
+
+2. **Semantic Inferences**: What semantic knowledge could be extracted?
+   - Field definitions (what does this column mean?)
+   - Business rules (what logic governs these values?)
+   - Time periods (if date columns exist)
+   - Metrics (if numeric aggregations are relevant)
+   - Dimensions (if categorical data exists)
+
+3. **Confidence**: How confident are you in these patterns? (0.0-1.0)
+   - 0.90-1.00: Very clear patterns (e.g., enum values, clear date logic)
+   - 0.70-0.89: Strong patterns (e.g., consistent value ranges)
+   - 0.50-0.69: Moderate patterns (e.g., inferred relationships)
+   - 0.30-0.49: Weak patterns (e.g., tentative observations)
+
+4. **Validation Query**: Suggest a SQL query to validate the pattern
+
+OUTPUT (JSON only, no markdown):
+{
+  "pattern": "Description of the detected pattern (e.g., 'status column contains enum values: active, inactive, pending')",
+  "confidence": 0.85,
+  "suggestedSemantic": {
+    "suggested_name": "active users",
+    "suggested_type": "BUSINESS_RULE",
+    "category": "User Status",
+    "description": "Users with status='active' are considered active users",
+    "sql_fragment": "status = 'active'",
+    "primary_table": "${tableName}",
+    "primary_column": "${columnName || 'status'}",
+    "synonyms": ["enabled users", "live users"],
+    "example_questions": ["How many active users?", "Show active users"]
+  },
+  "validationQuery": "SELECT DISTINCT ${columnName || 'status'} FROM ${tableName} ORDER BY ${columnName || 'status'}",
+  "tableName": "${tableName}",
+  "columnName": "${columnName || null}",
+  "evidence": {
+    "sampleData": ${JSON.stringify(sampleData.slice(0, 5))},
+    "statistics": {
+      "uniqueValues": ${columnName ? `Number of unique ${columnName} values` : 'N/A'},
+      "rowCount": ${data.rowCount}
+    },
+    "reasoning": "Explanation of why this pattern was detected"
+  }
+}
+
+Generate discovery:`;
+
+    try {
+      const result: any = await retryWithBackoff(
+        () => this.model.generateContent(prompt),
+        config.retry
+      );
+      
+      const text = result.response.text();
+      
+      // Extract JSON from response
+      let jsonText = text.trim();
+      if (jsonText.startsWith('```')) {
+        jsonText = jsonText.replace(/```json\s*\n?/g, '').replace(/```\s*$/g, '').trim();
+      }
+      
+      const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error('Failed to extract JSON from LLM response');
+      }
+      
+      const extracted = JSON.parse(jsonMatch[0]);
+      
+      const discovery: Discovery = {
+        pattern: extracted.pattern,
+        confidence: extracted.confidence || 0.70,
+        suggestedSemantic: extracted.suggestedSemantic ? {
+          suggested_name: extracted.suggestedSemantic.suggested_name,
+          suggested_type: extracted.suggestedSemantic.suggested_type,
+          suggested_definition: {
+            entityType: extracted.suggestedSemantic.suggested_type,
+            name: extracted.suggestedSemantic.suggested_name,
+            description: extracted.suggestedSemantic.description,
+            tableName: extracted.suggestedSemantic.primary_table,
+            columnName: extracted.suggestedSemantic.primary_column,
+            sqlPattern: extracted.suggestedSemantic.sql_fragment,
+            metadata: {
+              category: extracted.suggestedSemantic.category,
+              synonyms: extracted.suggestedSemantic.synonyms || [],
+              example_questions: extracted.suggestedSemantic.example_questions || [],
+            },
+          } as any,
+          learned_from: 'pattern_analysis',
+          confidence: extracted.confidence || 0.70,
+          status: 'pending',
+          requires_expert_review: (extracted.confidence || 0.70) < 0.70,
+        } : undefined,
+        validationQuery: extracted.validationQuery,
+        tableName: extracted.tableName || tableName,
+        columnName: extracted.columnName || columnName,
+        evidence: extracted.evidence || {},
+      };
+      
+      return discovery;
+    } catch (error) {
+      console.error('Error analyzing pattern:', error);
+      throw error;
     }
   }
 }

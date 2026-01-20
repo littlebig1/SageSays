@@ -240,6 +240,57 @@ async function handleCommand(cmd: string, args: string[]): Promise<boolean> {
       return false;
     }
     
+    case '/explore': {
+      if (!config.controlDbUrl) {
+        console.log('\n⚠️  Control database not configured. Set CONTROL_DB_URL to use discovery mode.\n');
+        return false;
+      }
+      
+      // Parse arguments: /explore [table] [column]
+      const tableName = args[0];
+      const columnName = args[1];
+      
+      if (!tableName) {
+        console.log('\nUsage: /explore <table> [column]');
+        console.log('  table  - Table name to explore');
+        console.log('  column - Optional column name to explore\n');
+        return false;
+      }
+      
+      // Build exploration question
+      const exploreQuestion = `/explore ${tableName}${columnName ? ` ${columnName}` : ''}`;
+      
+      // Get question function from main scope (readline interface)
+      const askQuestionFn = (prompt: string): Promise<string> => {
+        return new Promise((resolve) => {
+          rl.question(prompt, resolve);
+        });
+      };
+      
+      try {
+        const result = await globalOrchestrator!.executeDiscovery(exploreQuestion, undefined, askQuestionFn);
+        
+        console.log(`\n✅ Discovery completed!`);
+        console.log(`   Discoveries: ${result.discoveries.length}`);
+        console.log(`   Suggestions: ${result.suggestions.length}`);
+        console.log(`   Queries executed: ${result.logs.queries}`);
+        console.log(`   Total rows examined: ${result.logs.totalRows}\n`);
+        
+        if (result.suggestions.length > 0) {
+          console.log('📋 Discovered Semantics:');
+          result.suggestions.forEach((s, i) => {
+            console.log(`   ${i + 1}. ${s.suggested_name} (${s.suggested_type}) - ${s.status}`);
+          });
+          console.log('');
+        }
+      } catch (error: any) {
+        console.error('\n❌ Error during discovery:', error.message);
+        console.log('');
+      }
+      
+      return false;
+    }
+    
     case '/exit':
     case '/quit':
       return true;
@@ -257,6 +308,7 @@ Available commands:
   /show-schema [table]     - Show database schema (optionally filtered by table)
   /show-semantics          - Show business semantics definitions
   /review-suggestions      - Review pending semantic suggestions for approval
+  /explore <table> [col]   - Explore database schema to discover semantic patterns
   /help                    - Show this help message
   /exit, /quit            - Exit the CLI
 
@@ -862,7 +914,10 @@ async function main() {
           console.log(`\n🤔 [SMART MODE] Step ${stepNumber}/${totalSteps} - Review required:`);
           console.log(`\n${sql}\n`);
           console.log(`⚠️  Reason(s): ${reasons.join(', ')}`);
-          console.log(`   - Semantics: ${hasSemantics ? '✓ Detected' : '✗ None'}`);
+          console.log(`   - Semantics: ${hasSemantics ? '✓ Detected' : '✗ None (no learned business rules found)'}`);
+          if (!hasSemantics && meetsThreshold) {
+            console.log(`   ℹ️  Note: Metadata validation passed (${confidencePercentage}%), but no semantics detected. Review recommended.`);
+          }
           
           // Display validation details if available
           if (validationResult) {

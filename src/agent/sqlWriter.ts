@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { PlanStep, TableSchema, ConversationTurn } from '../types.js';
+import { PlanStep, TableSchema, ConversationTurn, OrchestratorState, SQLWriterNeeds } from '../types.js';
 import { config } from '../config.js';
 import { formatSchemaForLLM } from '../tools/inspectedDb.js';
 import { formatSemanticsForLLM, getSemantics, formatMetadataForLLM } from '../tools/controlDb.js';
@@ -19,7 +19,8 @@ export class SQLWriter {
     question: string,
     schema: TableSchema[],
     previousResults?: Array<{ step: number; result: any }>,
-    conversationHistory?: ConversationTurn[]
+    conversationHistory?: ConversationTurn[],
+    state?: OrchestratorState
   ): Promise<string> {
     // Validate schema is not empty
     if (!schema || schema.length === 0) {
@@ -148,6 +149,11 @@ Respond with ONLY the SQL query, nothing else. No explanations, no markdown form
       // Remove trailing semicolon if present (we'll add it in guard)
       sql = sql.replace(/;+\s*$/, '').trim();
       
+      // Express needs
+      if (state) {
+        this.expressNeeds(sql, step, schema, state);
+      }
+      
       return sql;
     } catch (error: any) {
       console.error('SQL generation error:', error);
@@ -165,5 +171,134 @@ Respond with ONLY the SQL query, nothing else. No explanations, no markdown form
       
       throw new Error(`Failed to generate SQL: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+  
+  /**
+   * Express SQL writer needs in state
+   */
+  private expressNeeds(
+    sql: string,
+    step: PlanStep,
+    schema: TableSchema[],
+    state: OrchestratorState
+  ): void {
+    const needs: SQLWriterNeeds = {
+      needsValidation: true, // Always needs validation
+      needsOptimization: this.analyzeOptimizationOpportunities(sql, schema),
+      blockedBy: this.identifyBlockers(sql, step, schema),
+      confidence: this.calculateConfidence(sql, step, schema),
+      canGenerate: sql.length > 0,
+    };
+    
+    if (!state.agentNeeds) {
+      state.agentNeeds = {};
+    }
+    state.agentNeeds.sqlWriter = needs;
+  }
+  
+  /**
+   * Analyze optimization opportunities
+   */
+  private analyzeOptimizationOpportunities(
+    sql: string,
+    schema: TableSchema[]
+  ): SQLWriterNeeds['needsOptimization'] {
+    const sqlUpper = sql.toUpperCase();
+    const issues: string[] = [];
+    
+    // Check for large table joins without filters
+    const hasJoin = sqlUpper.includes('JOIN');
+    const hasWhere = sqlUpper.includes('WHERE');
+    
+    if (hasJoin && !hasWhere) {
+      issues.push('JOINs without WHERE filters may be inefficient');
+    }
+    
+    // Check for potential full table scans
+    const largeTables = schema.filter(t => (t.metadata?.estimatedRowCount || 0) > 100000);
+    const largeTableNames = largeTables.map(t => t.tableName.toUpperCase());
+    
+    for (const tableName of largeTableNames) {
+      if (sqlUpper.includes(tableName) && !hasWhere) {
+        issues.push(`Large table ${tableName} accessed without filters`);
+      }
+    }
+    
+    if (issues.length > 0) {
+      return {
+        reason: issues.join('; '),
+        suggestedApproach: 'Add WHERE filters before JOINs, use indexed columns for filtering',
+      };
+    }
+    
+    return undefined;
+  }
+  
+  /**
+   * Identify what's blocking SQL generation
+   */
+  private identifyBlockers(
+    sql: string,
+    step: PlanStep,
+    schema: TableSchema[]
+  ): string | undefined {
+    if (!sql || sql.trim().length === 0) {
+      return 'SQL generation failed - empty result';
+    }
+    
+    // Check if SQL references unknown tables
+    const sqlUpper = sql.toUpperCase();
+    const tableNames = schema.map((t: TableSchema) => t.tableName.toUpperCase());
+    const sqlWords = sqlUpper.split(/\s+/);
+    const fromIndex = sqlWords.indexOf('FROM');
+    
+    if (fromIndex >= 0 && fromIndex < sqlWords.length - 1) {
+      const tableInSQL = sqlWords[fromIndex + 1];
+      if (!tableNames.includes(tableInSQL)) {
+        return `Unknown table referenced: ${tableInSQL}`;
+      }
+    }
+    
+    // Check if step description is unclear
+    if (!step.description || step.description.length < 10) {
+      return 'Step description is too vague';
+    }
+    
+    return undefined;
+  }
+  
+  /**
+   * Calculate confidence in generated SQL
+   */
+  private calculateConfidence(
+    sql: string,
+    step: PlanStep,
+    _schema: TableSchema[]
+  ): number {
+    let confidence = 0.7; // Base confidence
+    
+    // Increase confidence if SQL is well-formed
+    if (sql.includes('SELECT') && sql.includes('FROM')) {
+      confidence += 0.1;
+    }
+    
+    // Increase confidence if step has clear reasoning
+    if (step.reasoning && step.reasoning.length > 20) {
+      confidence += 0.1;
+    }
+    
+    // Decrease confidence if SQL is very short (might be incomplete)
+    if (sql.length < 30) {
+      confidence -= 0.2;
+    }
+    
+    // Decrease confidence if validation result shows issues
+    if (step.validationResult && !step.validationResult.valid) {
+      confidence -= 0.3;
+    } else if (step.validationResult && step.validationResult.valid) {
+      confidence += 0.1;
+    }
+    
+    return Math.max(0.0, Math.min(1.0, confidence));
   }
 }

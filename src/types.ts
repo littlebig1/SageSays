@@ -29,9 +29,19 @@ export interface PlanStep {
   validationResult?: SQLValidationResult;
 }
 
+export type PlanStatus = 'READY' | 'CLARIFICATION_NEEDED';
+
 export interface Plan {
+  status: PlanStatus;
   steps: PlanStep[];
   overallGoal: string;
+  clarificationQuestions?: string[];
+  clarificationContext?: string;
+}
+
+export interface ClarificationResponse {
+  questionIndex: number;
+  answer: string;
 }
 
 export interface SQLResult {
@@ -318,4 +328,289 @@ export interface ConversationTurn {
   resultColumns?: string[]; // Columns from last result
   resultTable?: string;     // Main table from last query
   timestamp: Date;
+}
+
+// ============================================================================
+// State Machine Types for Mode-Based Orchestrator
+// ============================================================================
+
+/**
+ * Top-level MODE types for orchestrator state machine
+ */
+export type Mode = 'QUERY' | 'DISCOVERY' | 'SEMANTIC_STORING';
+
+/**
+ * Sub-states for QUERY mode (null = terminated/done, no further action)
+ */
+export type QuerySubState = 'PLAN' | 'CLARIFICATION' | 'EXECUTE' | 'INTERPRET' | 'ANSWER' | null;
+
+/**
+ * Sub-states for DISCOVERY mode (null = terminated/done, no further action)
+ */
+export type DiscoverySubState = 'GET_DATA' | 'ANALYZE' | 'VALIDATE' | 'SUGGEST' | 'APPROVE' | 'STORE' | null;
+
+/**
+ * Sub-states for SEMANTIC_STORING mode (null = terminated/done, no further action)
+ */
+export type SemanticStoringSubState = 'VALIDATE' | 'APPROVE' | 'STORE' | null;
+
+/**
+ * Union type for all sub-states
+ */
+export type SubState = QuerySubState | DiscoverySubState | SemanticStoringSubState;
+
+/**
+ * Discovery result from pattern analysis
+ */
+export interface Discovery {
+  pattern: string;                    // Detected pattern description
+  confidence: number;                 // Confidence score (0.0-1.0)
+  suggestedSemantic?: Partial<SemanticSuggestion>; // Partial semantic suggestion
+  validationQuery?: string;           // SQL query to validate the pattern
+  tableName?: string;                 // Table where pattern was found
+  columnName?: string;                // Column where pattern was found
+  evidence?: {
+    sampleData?: any[];               // Sample data supporting the pattern
+    statistics?: Record<string, any>; // Statistical evidence
+    reasoning?: string;                // Why this pattern was detected
+  };
+}
+
+/**
+ * Execution context shared across all modes
+ */
+export interface ExecutionContext {
+  question?: string;
+  plan?: Plan;
+  executedSteps: PlanStep[];
+  previousResults: Array<{ step: number; result: SQLResult }>;
+  discoveries: Discovery[];
+  schema?: TableSchema[];
+  conversationHistory?: ConversationTurn[];
+  detectedSemanticIds?: string[];     // IDs of semantic entities detected
+  sqlQueries?: string[];              // All SQL queries executed
+  rowsReturned?: number[];            // Row counts for each query
+  durationsMs?: number[];            // Execution durations
+  startTime?: number;                 // Execution start timestamp
+  iterationCount?: number;            // Current iteration count
+  refinementCount?: number;           // Number of plan refinements
+  previousPlans?: string[];          // Plan signatures for loop detection
+}
+
+// ============================================================================
+// Agent Needs Types (for LLM-interpreted orchestration)
+// ============================================================================
+
+/**
+ * Planner agent needs/intentions
+ */
+export interface PlannerNeeds {
+  needsClarification?: boolean;
+  needsDiscovery?: {
+    reason: string;
+    target: string; // table or column
+    confidence: number;
+  };
+  needsMoreContext?: string[]; // List of missing context items
+  confidence: number; // 0.0-1.0
+  canProceed?: boolean;
+  blockingIssues?: string[];
+}
+
+/**
+ * SQL Writer agent needs/intentions
+ */
+export interface SQLWriterNeeds {
+  needsValidation?: boolean;
+  needsOptimization?: {
+    reason: string;
+    suggestedApproach?: string;
+  };
+  blockedBy?: string; // What's preventing SQL generation
+  confidence: number;
+  canGenerate?: boolean;
+}
+
+/**
+ * Interpreter agent needs/intentions
+ */
+export interface InterpreterNeeds {
+  needsRefinement?: {
+    reason: string;
+    suggestedNextStep?: string;
+  };
+  needsMoreData?: string[]; // What additional data is needed
+  confidence: number;
+  isComplete?: boolean;
+}
+
+/**
+ * Guard agent needs/intentions
+ */
+export interface GuardNeeds {
+  validationIssues?: string[];
+  safetyConcerns?: string[];
+  confidence: number;
+  isSafe?: boolean;
+}
+
+/**
+ * Discovery agent needs/intentions
+ */
+export interface DiscoveryNeeds {
+  canHelp?: boolean;
+  suggestedTarget?: string;
+  readyToExplore?: boolean;
+  confidence: number;
+}
+
+/**
+ * Collection of all agent needs
+ */
+export interface AgentNeeds {
+  planner?: PlannerNeeds;
+  sqlWriter?: SQLWriterNeeds;
+  interpreter?: InterpreterNeeds;
+  guard?: GuardNeeds;
+  discovery?: DiscoveryNeeds;
+}
+
+/**
+ * LLM decision result for orchestration
+ */
+export interface OrchestrationDecision {
+  nextMode: Mode;
+  nextSubState: SubState;
+  reasoning: string;
+  confidence: number; // 0.0-1.0
+  alternativeOptions?: Array<{
+    mode: Mode;
+    subState: SubState;
+    reasoning: string;
+    confidence: number;
+  }>;
+}
+
+/**
+ * Complete orchestrator state with all mode sub-states
+ */
+export interface OrchestratorState {
+  activeMode: Mode | null;            // Currently executing MODE (null = all modes terminated)
+  queryState: QuerySubState;          // null = QUERY mode terminated
+  discoveryState: DiscoverySubState; // null = DISCOVERY mode terminated
+  semanticStoringState: SemanticStoringSubState; // null = SEMANTIC_STORING mode terminated
+  context: ExecutionContext;
+  agentNeeds?: AgentNeeds;            // Agent needs/intentions for LLM interpretation
+  lastDecision?: OrchestrationDecision; // Last LLM decision made
+  decisionHistory?: OrchestrationDecision[]; // History of decisions for debugging/learning
+}
+
+// ============================================================================
+// Tool Result Types
+// ============================================================================
+
+/**
+ * Base tool result interface
+ */
+interface BaseToolResult {
+  success: boolean;
+  contextUpdates?: Partial<ExecutionContext>;
+}
+
+/**
+ * Planner tool result
+ */
+export interface PlannerResult extends BaseToolResult {
+  type: 'planner';
+  data: {
+    plan: Plan;
+    needsClarification: boolean;
+  };
+  nextState?: { mode: Mode; subState: SubState };
+}
+
+/**
+ * SQL Writer tool result
+ */
+export interface SQLWriterResult extends BaseToolResult {
+  type: 'sqlWriter';
+  data: {
+    sql: string;
+    step: PlanStep;
+  };
+  nextState?: { mode: Mode; subState: SubState };
+}
+
+/**
+ * SQL Execution result (combines SQLWriter + runSQL)
+ */
+export interface SQLExecutionResult extends BaseToolResult {
+  type: 'sqlExecution';
+  data: {
+    sql: string;
+    result: SQLResult;
+    step: PlanStep;
+  };
+  nextState?: { mode: Mode; subState: SubState };
+}
+
+/**
+ * Interpreter tool result
+ */
+export interface InterpreterResult extends BaseToolResult {
+  type: 'interpreter';
+  data: {
+    interpretation: Interpretation;
+  };
+  nextState?: { mode: Mode; subState: SubState };
+}
+
+/**
+ * Semantic Learner tool result
+ */
+export interface SemanticLearnerResult extends BaseToolResult {
+  type: 'semanticLearner';
+  data: {
+    discovery?: Discovery;
+    suggestion?: Omit<SemanticSuggestion, 'id' | 'created_at'>;
+  };
+  nextState?: { mode: Mode; subState: SubState };
+}
+
+/**
+ * Control DB tool result
+ */
+export interface ControlDbResult extends BaseToolResult {
+  type: 'controlDb';
+  data: {
+    suggestion?: SemanticSuggestion;
+    semantic?: Semantic;
+    runLog?: RunLog;
+  };
+  nextState?: { mode: Mode; subState: SubState };
+}
+
+/**
+ * Discriminated union of all tool result types
+ */
+export type ToolResult = 
+  | PlannerResult
+  | SQLWriterResult
+  | SQLExecutionResult
+  | InterpreterResult
+  | SemanticLearnerResult
+  | ControlDbResult;
+
+/**
+ * Discovery execution result
+ */
+export interface DiscoveryResult {
+  discoveries: Discovery[];
+  suggestions: SemanticSuggestion[];
+  completed: boolean;
+  logs: {
+    queries: number;
+    totalRows: number;
+    totalDuration: number;
+  };
 }

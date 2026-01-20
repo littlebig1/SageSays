@@ -988,15 +988,104 @@ export async function approveSuggestion(
  * 
  * Detect which semantics are relevant to a given question.
  */
+/**
+ * Detect which semantics are relevant to a given question.
+ * Uses multiple matching strategies:
+ * 1. Exact term match
+ * 2. Synonym match
+ * 3. Category match
+ * 4. Description keyword match
+ * 5. Example question match
+ * 6. Table/column relevance (if question mentions tables/columns from semantic)
+ */
 export async function detectSemantics(question: string): Promise<string[]> {
   const allSemantics = await getSemantics();
   const questionLower = question.toLowerCase();
   const detected: string[] = [];
   
   for (const semantic of allSemantics) {
-    // Check if semantic term appears in question
+    let isRelevant = false;
+    
+    // 1. Check if semantic term appears in question
     const termLower = semantic.term.toLowerCase();
     if (questionLower.includes(termLower)) {
+      isRelevant = true;
+    }
+    
+    // 2. Check synonyms
+    if (!isRelevant && semantic.synonyms && semantic.synonyms.length > 0) {
+      for (const synonym of semantic.synonyms) {
+        if (questionLower.includes(synonym.toLowerCase())) {
+          isRelevant = true;
+          break;
+        }
+      }
+    }
+    
+    // 3. Check category (e.g., "Organisation/Shop Name Matching")
+    if (!isRelevant && semantic.category) {
+      const categoryLower = semantic.category.toLowerCase();
+      // Check if category keywords appear in question
+      const categoryWords = categoryLower.split(/[\s\/\-_]+/);
+      for (const word of categoryWords) {
+        if (word.length > 3 && questionLower.includes(word)) {
+          isRelevant = true;
+          break;
+        }
+      }
+    }
+    
+    // 4. Check description keywords (common terms like "name", "match", "search")
+    if (!isRelevant && semantic.description) {
+      const descLower = semantic.description.toLowerCase();
+      // Extract key terms from description (words > 4 chars)
+      const descWords = descLower.match(/\b\w{5,}\b/g) || [];
+      for (const word of descWords) {
+        if (questionLower.includes(word)) {
+          isRelevant = true;
+          break;
+        }
+      }
+    }
+    
+    // 5. Check example questions
+    if (!isRelevant && semantic.exampleQuestions && semantic.exampleQuestions.length > 0) {
+      for (const example of semantic.exampleQuestions) {
+        const exampleLower = example.toLowerCase();
+        // Check if question contains key terms from example
+        const exampleWords = exampleLower.match(/\b\w{4,}\b/g) || [];
+        let matchCount = 0;
+        for (const word of exampleWords) {
+          if (questionLower.includes(word)) {
+            matchCount++;
+          }
+        }
+        // If 2+ words match, consider it relevant
+        if (matchCount >= 2) {
+          isRelevant = true;
+          break;
+        }
+      }
+    }
+    
+    // 6. Check table/column relevance
+    if (!isRelevant && semantic.tableName) {
+      const tableLower = semantic.tableName.toLowerCase();
+      // Check if question mentions the table (common variations)
+      const tableVariations = [
+        tableLower,
+        tableLower.replace(/_/g, ' '), // orders -> "orders"
+        tableLower.replace(/s$/, ''),   // orders -> "order"
+      ];
+      for (const variation of tableVariations) {
+        if (questionLower.includes(variation)) {
+          isRelevant = true;
+          break;
+        }
+      }
+    }
+    
+    if (isRelevant) {
       detected.push(semantic.id);
     }
   }
