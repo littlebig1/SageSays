@@ -2,15 +2,25 @@
 
 High-level architecture and design decisions for SageSays.
 
+**Last Updated**: 2026-01-20
+**Current Version**: v1.3.6
+**Architecture Maturity**: Level-2 Agentic System with Learning Capabilities
+
 ## Overview
 
-SageSays is a **Level-2 agentic system** that uses role-based orchestration to convert natural language questions into SQL queries, execute them safely, and provide natural language answers.
+SageSays is a **Level-2 agentic system** with **learning capabilities** that converts natural language questions into safe SQL queries, executes them, and continuously improves through user corrections.
 
 **Level-2 Agentic System** means:
-- Multiple specialized roles (Planner, SQL Writer, Interpreter, Guard)
+- Multiple specialized roles (Planner, SQL Writer, Interpreter, Guard, SemanticLearner)
 - Multi-step query decomposition and execution
 - Self-refinement based on intermediate results
 - Context preservation across steps
+
+**Learning System** features:
+- **Semantic Knowledge Base**: Stores business logic, domain concepts, and calculation rules
+- **Correction Learning**: Analyzes user corrections to generate new semantic suggestions
+- **Human Approval Workflow**: Review and approve AI-generated semantic improvements
+- **Continuous Improvement**: Each interaction can enhance future query generation
 
 ---
 
@@ -19,8 +29,9 @@ SageSays is a **Level-2 agentic system** that uses role-based orchestration to c
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    CLI (index.ts)                        │
-│  • Command handling (/debug, /help, /show-*)            │
+│  • Command handling (/debug, /help, /show-*, /review-*) │
 │  • User interaction loop                                │
+│  • Correction capture & learning workflow               │
 │  • Debug mode management                                │
 └──────────────────┬──────────────────────────────────────┘
                    │
@@ -31,18 +42,29 @@ SageSays is a **Level-2 agentic system** that uses role-based orchestration to c
 │  • Schema loading & caching                             │
 │  • Plan refinement (max 3 iterations)                   │
 │  • Context management for multi-step queries            │
-└──┬──────────┬──────────┬──────────┬─────────────────────┘
-   │          │          │          │
-   ▼          ▼          ▼          ▼
-┌────────┐ ┌────────┐ ┌──────────┐ ┌────────┐
-│Planner │ │SQL     │ │Interpret.│ │Guard   │
-│        │ │Writer  │ │          │ │        │
-└────────┘ └────────┘ └──────────┘ └────────┘
-   │          │          │          │
-   └──────────┴──────────┴──────────┘
-                   │
-                   ▼
-         ┌──────────────────────┐
+│  • Learning integration & semantic tracking             │
+└──┬──────────┬──────────┬──────────┬──────────┬─────────┘
+   │          │          │          │          │
+   ▼          ▼          ▼          ▼          ▼
+┌────────┐ ┌────────┐ ┌──────────┐ ┌────────┐ ┌────────────┐
+│Planner │ │SQL     │ │Interpret.│ │Guard   │ │Semantic   │
+│        │ │Writer  │ │          │ │        │ │Learner    │
+└────────┘ └────────┘ └──────────┘ └────────┘ └────────────┘
+   │          │          │          │          │
+   │          │          │          │          │
+   │          │          │          │          └─────┐
+   │          │          │          │                │
+   └──────────┴──────────┴──────────┘                │ Learning
+                   │                                 │ Workflow
+                   ▼                                 ▼
+         ┌──────────────────────┐      ┌────────────────────┐
+         │    Tools Layer        │      │ Semantic Learner  │
+         │  • controlDb.ts      │      │ • Correction      │
+         │    (learning, tracking) │      │   Analysis      │
+         │  • inspectedDb.ts    │      │ • Suggestion      │
+         │    (queries, schema) │      │   Generation     │
+         │  • pools.ts (shared) │      └────────────────────┘
+         └──────────────────────┘
          │    Tools Layer        │
          │  • controlDb.ts      │
          │    (learning, tracking) │
@@ -175,7 +197,45 @@ SageSays is a **Level-2 agentic system** that uses role-based orchestration to c
 
 ---
 
-### 5. Guard (`guard.ts`)
+### 5. SemanticLearner (`semanticLearner.ts`)
+
+**Responsibility**: Analyze user corrections and generate semantic improvements
+
+**Key Functions**:
+- `analyzeCorrection(correction, schema)` - Extract semantic knowledge from user feedback
+- `analyzeSqlDiff(originalSql, correctedSql)` - Compare SQL changes to identify patterns
+
+**Process**:
+1. Receives user correction (original question, generated SQL, user feedback)
+2. Uses LLM to analyze what semantic knowledge was missing
+3. Generates structured semantic suggestion with confidence score
+4. Stores suggestion for human approval via `/review-suggestions` command
+
+**Learning Triggers**:
+- **Post-execution corrections**: Keyword detection ("wrong", "incorrect", "that's not right")
+- **Pre-execution corrections**: Manual SQL editing in debug mode
+- **Automatic analysis**: LLM-powered pattern extraction from SQL differences
+
+**Output Format**:
+```typescript
+{
+  suggested_name: "Revenue Calculation",
+  suggested_type: "BUSINESS_RULE",
+  suggested_definition: {
+    description: "Revenue excludes canceled orders",
+    sqlPattern: "WHERE status != 'canceled'",
+    antiPatterns: [{ wrong: "Simple SUM", why: "Includes canceled orders" }]
+  },
+  confidence: 0.85,
+  learning_dialogue: { /* full context */ }
+}
+```
+
+**Integration**: Works with `semantic_suggestions` table for human approval workflow
+
+---
+
+### 6. Guard (`guard.ts`)
 
 **Responsibility**: Validate SQL for safety and correctness
 
@@ -198,6 +258,191 @@ SageSays is a **Level-2 agentic system** that uses role-based orchestration to c
   sanitizedSQL?: string      // If valid (with LIMIT added)
 }
 ```
+
+---
+
+## LLM Service Architecture
+
+### 1. Service Provider: Google Gemini
+
+**Provider**: Google Gemini (Google AI)
+**Library**: `@google/generative-ai` npm package
+**Current Model**: `gemini-2.0-flash-exp` (configurable via `GEMINI_MODEL` env var)
+
+**Why Gemini:**
+- Strong reasoning capabilities for SQL generation
+- Good at understanding database schemas and relationships
+- Cost-effective for development and testing
+- Reliable structured output (JSON plans, SQL queries)
+
+### 2. Service Configuration
+
+**Environment Variables**:
+```bash
+# Required
+GEMINI_API_KEY=your_api_key_here
+
+# Optional (defaults shown)
+GEMINI_MODEL=gemini-2.0-flash-exp
+STATEMENT_TIMEOUT_MS=10000
+MAX_RESULT_ROWS_FOR_LLM=50
+```
+
+**Configuration Location**: `src/config.ts`
+- Centralized configuration management
+- Type-safe environment variable handling
+- Validation of required settings
+
+### 3. Service Integration
+
+**Agent Integration**:
+- **Planner**: Uses LLM for multi-step plan generation
+- **SQL Writer**: Uses LLM for PostgreSQL query generation
+- **Interpreter**: Uses LLM for result analysis and next-step decisions
+- **SemanticLearner**: Uses LLM for correction analysis and semantic extraction
+
+**Service Pattern**:
+```typescript
+// Each agent creates its own Gemini client
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+export class Planner {
+  private genAI: GoogleGenerativeAI;
+
+  constructor() {
+    this.genAI = new GoogleGenerativeAI(config.geminiApiKey);
+  }
+
+  async createPlan(question: string, schema: TableSchema[]): Promise<Plan> {
+    // Implementation
+  }
+}
+```
+
+### 4. Prompt Engineering
+
+**Structured Prompts**:
+- **Planner**: JSON output format with `overallGoal` and `steps` array
+- **SQL Writer**: PostgreSQL-specific syntax with safety warnings
+- **Interpreter**: Analysis decisions with confidence scoring
+- **SemanticLearner**: Correction analysis with suggestion generation
+
+**Context Provision**:
+- Database schema (tables, columns, relationships)
+- Business semantics (when available)
+- Previous query results (for multi-step workflows)
+- Safety instructions and formatting requirements
+
+### 5. Error Handling & Resilience
+
+**Retry Logic**: Exponential backoff for transient failures
+- **Max Retries**: 3 attempts
+- **Backoff**: 1s → 2s → 4s delays
+- **Retryable Errors**: 503 (overloaded), 429 (rate limit), network errors
+
+**Error Recovery**:
+- Graceful degradation when LLM unavailable
+- User-friendly error messages
+- Context preservation for manual recovery
+
+### 6. Future Extensibility
+
+**Multi-Provider Support**: Designed for easy provider switching
+```typescript
+// Future: Abstract interface for different LLM providers
+interface LLMProvider {
+  generatePlan(prompt: string): Promise<Plan>;
+  generateSQL(prompt: string): Promise<string>;
+  analyzeResults(prompt: string): Promise<Analysis>;
+}
+
+// Current: Direct Gemini integration
+// Future: LLMProvider implementations for OpenAI, Anthropic, etc.
+```
+
+**Model Flexibility**: Environment-driven model selection
+- Easy A/B testing of different models
+- Performance comparison capabilities
+- Cost optimization options
+
+---
+
+## Learning System Architecture
+
+### 1. Semantic Knowledge Base
+
+**Purpose**: Store and retrieve business logic, domain concepts, and calculation rules that improve query generation accuracy.
+
+**Storage**: Control database (`semantic_entities` table)
+- **Entity Types**: `entity`, `metric`, `rule`, `time_period`, `anti_pattern`
+- **Rich Metadata**: SQL patterns, synonyms, anti-patterns, examples, notes
+- **Versioning**: Track changes and improvements over time
+- **Confidence Scores**: 0.0-1.0 based on validation and usage success
+
+**Integration**:
+- **Prompt Enhancement**: Semantics included in Planner, SQL Writer, and Interpreter prompts
+- **Usage Tracking**: Increments `usage_count` each time semantic is applied
+- **Version Management**: New versions created when semantics are updated
+
+### 2. Correction Learning Workflow
+
+**Trigger Points**:
+1. **Post-Execution**: User says "that's wrong" → `capturePostExecutionCorrection()`
+2. **Pre-Execution**: Debug mode rejection → `capturePreExecutionFeedback()` or `handleManualSqlEdit()`
+
+**Learning Process**:
+```
+User Correction → SemanticLearner Analysis → Suggestion Generation → Human Approval → Semantic Creation
+     ↓              ↓                      ↓                     ↓              ↓
+  "wrong"      LLM analysis         structured          /review-suggestions   new semantic
+ keywords    missing patterns       suggestion         approve/reject      in knowledge base
+```
+
+**LLM Analysis**:
+- Compares original vs corrected SQL to identify patterns
+- Analyzes user feedback for business logic insights
+- Generates confidence scores based on evidence strength
+- Creates structured suggestions with examples and anti-patterns
+
+### 3. Human Approval Workflow
+
+**Command**: `/review-suggestions`
+- Lists pending suggestions with evidence
+- Shows original question, generated SQL, user correction
+- Interactive approval/rejection/modification
+
+**Approval Actions**:
+- **Approve**: Creates new `semantic_entity` with 'learned' source
+- **Reject**: Marks suggestion as rejected with reason
+- **Modify**: Edit suggestion details before approval
+
+**Quality Control**: Human oversight ensures semantic accuracy before system learning
+
+### 4. Semantic Application
+
+**Detection**: Multiple strategies used together
+- **Exact Match**: Synonyms and keyword matching
+- **Semantic Match**: LLM-powered relevance scoring
+- **Pattern Match**: SQL fragment recognition
+
+**Scoring**: Combines multiple signals
+- `usage_count`: How often semantic has been successfully applied
+- `confidence`: Original creation confidence (0.0-1.0)
+- `last_success`: Timestamp of last successful application
+
+### 5. Continuous Improvement
+
+**Feedback Loop**:
+- Each query tracks which semantics were detected vs applied
+- Success rates update semantic confidence scores
+- Failed applications can trigger re-learning
+- Human corrections generate new semantic suggestions
+
+**Metrics Tracking**:
+- Semantic detection accuracy
+- Query success rates with vs without semantics
+- User correction frequency and patterns
+- Learning velocity (new semantics created over time)
 
 ---
 
@@ -303,6 +548,39 @@ SageSays is a **Level-2 agentic system** that uses role-based orchestration to c
 9. CLI displays answer to user
 ```
 
+### Learning Flow (When Corrections Occur)
+
+```
+User dissatisfied: "that's wrong, revenue should exclude canceled orders"
+   ↓
+1. CLI detects correction keywords → capturePostExecutionCorrection()
+   ↓
+2. SemanticLearner analyzes correction + original SQL + schema
+   ↓
+3. LLM generates semantic suggestion:
+   {
+     suggested_name: "Revenue Calculation",
+     suggested_type: "BUSINESS_RULE",
+     suggested_definition: { sqlPattern: "WHERE status != 'canceled'" }
+   }
+   ↓
+4. Suggestion stored in semantic_suggestions table (pending approval)
+   ↓
+5. User runs /review-suggestions → approves suggestion
+   ↓
+6. Approved suggestion becomes semantic_entity in knowledge base
+   ↓
+7. Future queries benefit: "What's our revenue?" → uses correct SQL pattern
+```
+
+### Full System Flow with Learning
+
+```
+Query → Planning → Execution → Answer → [Optional: Correction] → Learning → Improvement
+   ↑                                                                     ↓
+   └──────────────────── Feedback Loop ────────────────────────────────┘
+```
+
 ---
 
 ## Design Decisions
@@ -317,6 +595,19 @@ SageSays is a **Level-2 agentic system** that uses role-based orchestration to c
 
 **Alternative considered**: Single LLM call for everything
 **Why rejected**: Less flexible, harder to debug, can't iterate on plan
+
+---
+
+### 2. Why Learning System?
+
+**Benefit**: System continuously improves from user corrections
+- **Semantic Knowledge Base**: Stores business logic that LLMs can't know
+- **Correction Learning**: Turns user feedback into reusable knowledge
+- **Human Approval**: Quality control before system learns
+- **Continuous Improvement**: Each interaction can enhance future queries
+
+**Alternative considered**: Static semantic library
+**Why rejected**: Can't learn domain-specific business rules, no adaptation to user corrections
 
 ---
 

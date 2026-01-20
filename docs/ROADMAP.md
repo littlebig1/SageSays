@@ -1,8 +1,8 @@
 # SageSays Roadmap
 
-> **Last Updated**: 2026-01-20  
-> **Current Version**: v1.3.5  
-> **Next Target**: Phase 3 (remaining tasks) or Phase 4 - Complex Logic Handling
+> **Last Updated**: 2026-01-20
+> **Current Version**: v1.3.6
+> **Next Target**: Phase 7.1 (Testing Quick Wins) or Phase 4 (Complex Logic Handling)
 
 ---
 
@@ -101,6 +101,88 @@ npx tsx scripts/test-semantic-detection.ts
 - ⏳ Queries measurably better with semantics (requires real-world testing)
 
 **Outcome**: ✅ **Phase 2 complete - system now actively uses semantics!**
+
+---
+
+### Phase 3.1-3.2: Learning from User Corrections (v1.3.0) - **COMPLETED**
+
+**Goal**: Automatically learn new semantics from user corrections with LLM-powered analysis
+
+**Completed Tasks**:
+
+#### 3.1 Capture Corrections ✅
+
+- [x] Add correction detection in CLI
+  - [x] Detect keywords: "wrong", "incorrect", "that's not right", "not correct", "bad result"
+  - [x] Prompt: "What was wrong? / What should it be?" (interactive correction capture)
+  - [x] Store correction details in run_logs table
+
+- [x] Create `CorrectionCapture` interface
+  ```typescript
+  interface CorrectionCapture {
+    run_log_id?: string;
+    correction_stage: 'pre_execution' | 'post_execution';
+    original_question: string;
+    original_sql: string;
+    user_feedback: string;
+    correction_type: 'wrong_sql' | 'wrong_result' | 'wrong_interpretation';
+    corrected_sql?: string;
+    expected_result?: string;
+  }
+  ```
+
+- [x] Update `run_logs` table usage:
+  - [x] Set `was_corrected = true` flag
+  - [x] Store correction details in `user_feedback` JSONB field
+  - [x] Track `correction_type` and `correction_stage`
+
+#### 3.2 Extract Semantic Patterns ✅
+
+- [x] Create `SemanticLearner` class (`src/agent/semanticLearner.ts`)
+  - [x] `analyzeCorrection(runLog, correction, schema): SemanticSuggestion`
+  - [x] LLM-powered analysis of user corrections
+  - [x] Generate structured semantic suggestions
+
+- [x] Implement pattern extraction:
+  ```typescript
+  // Example: User says "Revenue should exclude canceled orders"
+  // System extracts and suggests:
+  {
+    suggested_name: "Revenue Calculation",
+    suggested_type: "BUSINESS_RULE",
+    suggested_definition: {
+      has_complex_logic: true,
+      complex_logic: { /* rules */ },
+      anti_patterns: { /* wrong approaches */ }
+    }
+  }
+  ```
+
+- [x] Save to `semantic_suggestions` table
+  - [x] Status: 'pending' (awaiting approval)
+  - [x] Confidence score (0.0 to 1.0) based on evidence strength
+  - [x] Link to source `run_log_id` for traceability
+  - [x] Store `learning_dialogue` with full context
+
+- [x] Implement `/review-suggestions` command
+  - [x] List all pending suggestions with evidence
+  - [x] Interactive approval/rejection/modification workflow
+  - [x] Approved suggestions become new semantic entities
+
+**Technical Implementation**:
+- **Files Created**: `src/agent/semanticLearner.ts` (176 lines), `src/tools/corrections.ts`, `src/tools/suggestions.ts`
+- **Files Modified**: `src/types.ts` (added interfaces), `src/index.ts` (CLI integration), `src/agent/orchestrator.ts`
+- **Database Tables**: Enhanced `run_logs` (correction tracking), new `semantic_suggestions` table
+- **LLM Integration**: Semantic pattern extraction with confidence scoring
+
+**Success Criteria**:
+- ✅ System detects post-execution corrections automatically
+- ✅ LLM analyzes corrections and generates semantic suggestions
+- ✅ Human approval workflow for quality control
+- ✅ Approved suggestions become reusable semantic knowledge
+- ✅ Full learning loop: correction → analysis → suggestion → approval → semantic
+
+**Outcome**: ✅ **Phase 3.1-3.2 complete - SageSays now learns from user corrections!**
 
 ---
 
@@ -254,9 +336,14 @@ npx tsx scripts/test-semantic-detection.ts
 
 > **Last Updated**: 2026-01-20
 > **Current Version**: v1.3.6
-> **Next Target**: Phase 3 (remaining tasks) or Phase 4 - Complex Logic Handling
+> **Next Target**: Phase 7.1 (Testing Quick Wins) or Phase 4 (Complex Logic Handling)
 
 **Recent Changes**:
+- ✅ **Phase 3 COMPLETED**: Full learning from user corrections implemented
+  - Post-execution correction capture with keyword detection
+  - LLM-powered semantic pattern extraction
+  - Semantic suggestions approval workflow
+  - Pre-execution corrections with manual SQL editing
 - ✅ **Phase 6.6 Completed**: Tool consolidation with clear database separation
   - Control DB operations → `src/tools/controlDb.ts`
   - Inspected DB operations → `src/tools/inspectedDb.ts`
@@ -265,66 +352,6 @@ npx tsx scripts/test-semantic-detection.ts
 ---
 
 ## 📋 Upcoming Phases
-
-### Phase 3: Learning from User Corrections (v1.3.0) - **IN PROGRESS**
-
-> **Note**: Phase 3.3 (Pre-Execution Corrections) is already completed. See "Completed Phases" section above.
-
-**Goal**: Automatically learn new semantics from user corrections
-
-### 3.1 Capture Corrections
-
-**Tasks**:
-- [ ] Add correction detection in CLI
-  - [ ] Detect keywords: "wrong", "incorrect", "that's not right"
-  - [ ] Prompt: "What was wrong? / What should it be?"
-  - [ ] Store correction details
-
-- [ ] Create `CorrectionCapture` interface
-  ```typescript
-  interface CorrectionCapture {
-    run_log_id: string;
-    user_feedback: string;
-    correct_answer?: string;
-    correction_type: 'wrong_result' | 'wrong_sql' | 'wrong_interpretation';
-  }
-  ```
-
-- [ ] Update `run_logs` table usage:
-  - [ ] Set `was_corrected = true`
-  - [ ] Store in `user_feedback` JSONB field
-
-### 3.2 Extract Semantic Patterns
-
-**Tasks**:
-- [ ] Create `SemanticLearner` class
-  - [ ] `analyzeCorrection(runLog, correction): SemanticSuggestion`
-  - [ ] Use LLM to identify missing semantic knowledge
-  - [ ] Generate structured suggestion
-
-- [ ] Implement pattern extraction:
-  ```typescript
-  // Example: User says "Revenue should exclude canceled orders"
-  // System extracts:
-  {
-    suggested_name: "Revenue Calculation",
-    suggested_type: "BUSINESS_RULE",
-    suggested_definition: {
-      has_complex_logic: true,
-      complex_logic: { /* rules */ },
-      anti_patterns: { /* wrong approaches */ }
-    }
-  }
-  ```
-
-- [ ] Save to `semantic_suggestions` table
-  - [ ] Status: 'pending'
-  - [ ] Confidence score based on evidence strength
-  - [ ] Link to source run_log_id
-
-> **Note**: Phase 3.3 (Pre-Execution Corrections) has been completed. See "Completed Phases" section above for details.
-
----
 
 ### Phase 4: Complex Logic Handling (v1.4.0)
 
@@ -1207,6 +1234,181 @@ Common Mistakes: ${JSON.stringify(semantic.anti_patterns)}
 
 ---
 
+### Phase 9.1: Planner Clarification for Ambiguous Queries (v1.4.0) - **NEXT**
+
+**Goal**: Planner asks for clarification when user intent is unclear or ambiguous, rather than making assumptions
+
+**Why Priority**: New functionality that will determine LLM function requirements for handling ambiguity
+
+**Tasks**:
+- [ ] **Ambiguity Detection**: Analyze user questions for unclear intent
+  - [ ] Detect vague terms ("recent", "some", "few", "many")
+  - [ ] Identify missing context (time ranges, categories, filters)
+  - [ ] Flag questions needing clarification vs. those that can be answered
+
+- [ ] **Clarification Prompts**: Interactive clarification workflow
+  - [ ] Generate specific clarification questions based on ambiguity type
+  - [ ] Preserve conversation context during clarification
+  - [ ] Allow multiple rounds of clarification if needed
+
+- [ ] **Planner Integration**: Update `planner.ts` to handle clarification
+  - [ ] Return `CLARIFICATION_NEEDED` status instead of plan
+  - [ ] Include suggested clarification questions in response
+  - [ ] Resume planning after clarification received
+
+- [ ] **UI Integration**: Update CLI to handle clarification flow
+  - [ ] Display clarification prompts clearly
+  - [ ] Collect user responses and re-submit to planner
+  - [ ] Show progress through clarification workflow
+
+**Examples**:
+```
+❓ Ambiguous: "Show me recent orders"
+🤔 Clarification: "What time period counts as 'recent'? (last week, last month, last quarter)"
+
+❓ Ambiguous: "Find customers with high value"
+🤔 Clarification: "What defines 'high value'? (revenue > $1000, > $5000, top 10%)"
+
+❓ Ambiguous: "Compare sales performance"
+🤔 Clarification: "Compare sales between what? (regions, time periods, products)"
+```
+
+**Success Criteria**:
+- ✅ Planner detects ambiguous queries accurately (>90% coverage)
+- ✅ Generated clarification questions are helpful and specific
+- ✅ Users can provide clarification and continue seamlessly
+- ✅ No false positives (clear questions proceed normally)
+- ✅ Conversation context preserved through clarification
+
+**Estimated Effort**: 3-4 hours
+
+---
+
+### Phase 9.2: LLM Abstraction Layer (v1.4.1)
+
+**Goal**: Create abstraction layer for easy switching between LLM providers (OpenAI, Anthropic, etc.)
+
+**Why After 9.1**: Using insights from planner clarification work, we have full view of LLM function requirements
+
+**Tasks**:
+- [ ] **LLMProvider Interface**: Define common interface for all LLM providers
+  ```typescript
+  interface LLMProvider {
+    generatePlan(prompt: string): Promise<Plan>;
+    generateSQL(prompt: string): Promise<string>;
+    analyzeResults(prompt: string): Promise<Analysis>;
+    getCostEstimate(inputTokens: number, outputTokens: number): number;
+  }
+  ```
+
+- [ ] **Provider Implementations**:
+  - [ ] `GeminiProvider` (current implementation)
+  - [ ] `OpenAIProvider` (future)
+  - [ ] `AnthropicProvider` (future)
+
+- [ ] **Configuration System**: Environment-driven provider selection
+  ```bash
+  LLM_PROVIDER=gemini  # or openai, anthropic
+  LLM_MODEL=gemini-2.0-flash-exp
+  ```
+
+- [ ] **Refactor Agents**: Update Planner, SQLWriter, Interpreter, SemanticLearner
+  - [ ] Inject LLMProvider instead of direct Gemini calls
+  - [ ] Maintain backward compatibility during transition
+
+- [ ] **Cost Integration**: Each provider returns cost estimates for monitoring
+
+**Success Criteria**:
+- ✅ Easy switching between LLM providers via config
+- ✅ All agents work with any provider implementation
+- ✅ Cost tracking integrated into provider interface
+- ✅ Backward compatibility maintained
+
+**Estimated Effort**: 4-6 hours
+
+---
+
+### Phase 9.3: Costing Calculation & Monitoring (v1.4.2)
+
+**Goal**: Track and monitor LLM API costs per inference and provide usage analytics
+
+**Why After 9.2**: With abstraction layer in place, we can implement comprehensive cost monitoring across providers
+
+**Tasks**:
+- [ ] **Cost Tracking per Inference**:
+  - [ ] Track input/output tokens for each LLM call
+  - [ ] Calculate cost using provider-specific pricing
+  - [ ] Store cost data in control database
+
+- [ ] **Cost Analytics**:
+  - [ ] Per-agent cost breakdown (Planner, SQLWriter, etc.)
+  - [ ] Per-session cost tracking
+  - [ ] Daily/weekly/monthly cost reports
+  - [ ] Cost trends and optimization opportunities
+
+- [ ] **Cost Monitoring Commands**:
+  - [ ] `/cost-summary` - Show recent costs
+  - [ ] `/cost-breakdown` - Costs by agent/component
+  - [ ] `/cost-limits` - Set budget alerts
+
+- [ ] **Cost Optimization**:
+  - [ ] Identify expensive queries/patterns
+  - [ ] Suggest cost-saving alternatives
+  - [ ] Provider comparison for cost efficiency
+
+**Success Criteria**:
+- ✅ All LLM calls have cost tracking
+- ✅ Cost analytics available via CLI commands
+- ✅ Budget monitoring and alerts
+- ✅ Cost optimization recommendations
+
+**Estimated Effort**: 2-3 hours
+
+---
+
+### Phase 9.4: Advanced Interpreter & Results Display (v1.5.0)
+
+**Goal**: Multiple result display formats beyond text-only answers (tables, graphs/charts, summaries)
+
+**Why Last**: End goal that can leverage all previous architectural improvements
+
+**Tasks**:
+- [ ] **Result Format Detection**: Automatically choose best display format
+  - [ ] Small datasets → Table format
+  - [ ] Time series → Chart/graph
+  - [ ] Aggregations → Summary cards
+  - [ ] Large datasets → Paginated views
+
+- [ ] **Table Display**: Enhanced tabular output
+  - [ ] Auto-column sizing and formatting
+  - [ ] Sortable columns
+  - [ ] Export options (CSV, JSON)
+
+- [ ] **Chart/Graph Support**: Visual data representation
+  - [ ] Time series charts for date-based data
+  - [ ] Bar/pie charts for categorical data
+  - [ ] Trend lines for metrics over time
+
+- [ ] **Summary Generation**: AI-powered result summarization
+  - [ ] Key insights extraction
+  - [ ] Trend identification
+  - [ ] Anomaly highlighting
+
+- [ ] **Display Options**: User choice of format
+  - [ ] `/display table` - Force table view
+  - [ ] `/display chart` - Force chart view
+  - [ ] `/display summary` - Force summary view
+
+**Success Criteria**:
+- ✅ Automatic format selection works well
+- ✅ Table, chart, and summary formats implemented
+- ✅ User can override automatic selection
+- ✅ Results are more engaging and informative
+
+**Estimated Effort**: 6-8 hours
+
+---
+
 ## 🔄 Review Schedule
 
 - **Weekly**: Update progress, add notes
@@ -1234,4 +1436,4 @@ Common Mistakes: ${JSON.stringify(semantic.anti_patterns)}
 
 ---
 
-**Next Session**: Phase 3 - Learning from User Corrections (semantic suggestions, approval workflow)
+**Next Session**: Phase 9.1 - Planner Clarification (determine LLM requirements, improve query quality)

@@ -17,7 +17,7 @@ import {
   getPendingSuggestions
 } from './tools/controlDb.js';
 import { config } from './config.js';
-import { DebugMode, confidenceToPercentage, meetsConfidenceThreshold, CorrectionCapture, SemanticSuggestion, ConversationTurn } from './types.js';
+import { DebugMode, confidenceToPercentage, meetsConfidenceThreshold, CorrectionCapture, SemanticSuggestion, ConversationTurn, SQLValidationResult } from './types.js';
 import { SemanticLearner } from './agent/semanticLearner.js';
 
 const rl = readline.createInterface({
@@ -445,6 +445,56 @@ async function showImmediateApprovalPrompt(suggestion: SemanticSuggestion): Prom
 }
 
 /**
+ * Display validation details in a formatted way
+ */
+function displayValidationDetails(validation: SQLValidationResult): void {
+  console.log('\n📊 Validation Details:');
+  console.log('─'.repeat(60));
+  
+  if (validation.facts.length > 0) {
+    console.log(`✓ Facts (${validation.facts.length}):`);
+    validation.facts.slice(0, 5).forEach(fact => {
+      console.log(`   • ${fact}`);
+    });
+    if (validation.facts.length > 5) {
+      console.log(`   ... and ${validation.facts.length - 5} more`);
+    }
+  }
+  
+  if (validation.assumptions.length > 0) {
+    console.log(`\n⚠️  Assumptions (${validation.assumptions.length}):`);
+    validation.assumptions.slice(0, 3).forEach(assumption => {
+      console.log(`   • ${assumption}`);
+    });
+    if (validation.assumptions.length > 3) {
+      console.log(`   ... and ${validation.assumptions.length - 3} more`);
+    }
+  }
+  
+  if (validation.unknowns.length > 0) {
+    console.log(`\n❓ Unknowns (${validation.unknowns.length}):`);
+    validation.unknowns.slice(0, 3).forEach(unknown => {
+      console.log(`   • ${unknown}`);
+    });
+    if (validation.unknowns.length > 3) {
+      console.log(`   ... and ${validation.unknowns.length - 3} more`);
+    }
+  }
+  
+  console.log(`\n📈 Confidence: ${(validation.confidence * 100).toFixed(0)}% (${validation.confidence >= 0.8 ? 'high' : validation.confidence >= 0.5 ? 'medium' : 'low'})`);
+  console.log(`⚡ Performance Risk: ${validation.performanceRisk.toUpperCase()}`);
+  
+  if (validation.grain) {
+    console.log(`📊 Grain: ${validation.grain.replace('_', ' ')}`);
+  }
+  
+  console.log(`\n✓ Tables validated: ${validation.tablesValidated ? 'Yes' : 'No'}`);
+  console.log(`✓ Columns validated: ${validation.columnsValidated ? 'Yes' : 'No'}`);
+  console.log(`✓ Joins validated: ${validation.joinsValidated ? 'Yes' : 'No'}`);
+  console.log('─'.repeat(60));
+}
+
+/**
  * Review pending semantic suggestions.
  * This is the deferred approval workflow (Option A).
  */
@@ -741,7 +791,8 @@ async function main() {
         stepNumber: number, 
         totalSteps: number,
         hasSemantics: boolean,
-        confidence: 'high' | 'medium' | 'low'
+        confidence: 'high' | 'medium' | 'low',
+        validationResult?: import('./types.js').SQLValidationResult
       ): Promise<boolean> => {
         // OFF mode: always approve
         if (debugMode === 'off') {
@@ -752,6 +803,11 @@ async function main() {
         if (debugMode === 'on') {
           console.log(`\n🐛 [DEBUG] Step ${stepNumber}/${totalSteps} - Query ready for execution:`);
           console.log(`\n${sql}\n`);
+          
+          // Display validation details if available
+          if (validationResult) {
+            displayValidationDetails(validationResult);
+          }
           
           const response = await question('Execute this query? (y/n/edit): ');
           const input = response.trim().toLowerCase();
@@ -807,6 +863,11 @@ async function main() {
           console.log(`\n${sql}\n`);
           console.log(`⚠️  Reason(s): ${reasons.join(', ')}`);
           console.log(`   - Semantics: ${hasSemantics ? '✓ Detected' : '✗ None'}`);
+          
+          // Display validation details if available
+          if (validationResult) {
+            displayValidationDetails(validationResult);
+          }
           console.log(`   - Confidence: ${confidencePercentage}% (threshold: ${config.debugModeConfidenceThreshold}%)\n`);
           
           const response = await question('Execute this query? (y/n/edit): ');

@@ -4,7 +4,8 @@ import { Interpreter } from './interpreter.js';
 import { PlanStep, SQLResult, ConversationTurn } from '../types.js';
 import { runSQL, getSchemaWithMetadata, getInspectedDbPool } from '../tools/inspectedDb.js';
 import { validateSQL } from './guard.js';
-import { saveRunLog, detectSemantics } from '../tools/controlDb.js';
+import { saveRunLog, detectSemantics, getAllTableMetadata } from '../tools/controlDb.js';
+import { validateSQLAgainstMetadata, calculateConfidence } from './sqlValidator.js';
 import { config } from '../config.js';
 
 export class Orchestrator {
@@ -54,7 +55,8 @@ export class Orchestrator {
       stepNumber: number, 
       totalSteps: number,
       hasSemantics: boolean,
-      confidence: 'high' | 'medium' | 'low'
+      confidence: 'high' | 'medium' | 'low',
+      validationResult?: import('../types.js').SQLValidationResult
     ) => Promise<boolean>,
     askQuestion?: (prompt: string) => Promise<string>
   ): Promise<{ answer: string; logs: any; cancelled?: boolean; runLogId?: string; sqlQueries?: string[] }> {
@@ -112,30 +114,68 @@ export class Orchestrator {
         console.log('   Generating SQL...');
         let sql = await this.sqlWriter.generateSQL(step, question, schema, previousResults, conversationHistory);
         
-        // Validate and sanitize SQL
-        const validation = validateSQL(sql);
-        if (!validation.valid) {
-          throw new Error(`SQL validation failed: ${validation.reason}`);
+        // Validate and sanitize SQL (safety checks)
+        const safetyValidation = validateSQL(sql);
+        if (!safetyValidation.valid) {
+          throw new Error(`SQL validation failed: ${safetyValidation.reason}`);
         }
         
-        sql = validation.sanitizedSQL || sql;
+        sql = safetyValidation.sanitizedSQL || sql;
         step.sqlQuery = sql;
+        
+        // Validate SQL against metadata (zero hallucination checks)
+        let metadataValidation;
+        let confidence: 'high' | 'medium' | 'low' = 'medium';
+        
+        try {
+          const metadata = await getAllTableMetadata();
+          if (metadata.length > 0) {
+            metadataValidation = await validateSQLAgainstMetadata(sql, schema, metadata);
+            
+            if (!metadataValidation.valid) {
+              throw new Error(`SQL metadata validation failed: ${metadataValidation.issues.join(', ')}`);
+            }
+            
+            // Calculate confidence based on validation
+            confidence = calculateConfidence(metadataValidation, hasSemantics);
+            
+            // Store validation result in step
+            step.validationResult = metadataValidation;
+          }
+        } catch (error: any) {
+          // If metadata validation fails, log warning but continue if it's not critical
+          if (error.message.includes('metadata validation failed')) {
+            throw error; // Re-throw critical validation failures
+          }
+          console.warn(`   ⚠️  Metadata validation warning: ${error.message}`);
+        }
         
         // ALWAYS show the generated SQL for transparency
         console.log(`   📄 SQL: ${sql}`);
         
+        // Show validation details if available
+        if (metadataValidation) {
+          if (metadataValidation.facts.length > 0) {
+            console.log(`   ✓ Facts: ${metadataValidation.facts.slice(0, 3).join('; ')}${metadataValidation.facts.length > 3 ? '...' : ''}`);
+          }
+          if (metadataValidation.assumptions.length > 0) {
+            console.log(`   ⚠️  Assumptions: ${metadataValidation.assumptions.slice(0, 2).join('; ')}${metadataValidation.assumptions.length > 2 ? '...' : ''}`);
+          }
+          if (metadataValidation.unknowns.length > 0) {
+            console.log(`   ❓ Unknowns: ${metadataValidation.unknowns.slice(0, 2).join('; ')}${metadataValidation.unknowns.length > 2 ? '...' : ''}`);
+          }
+          console.log(`   📊 Confidence: ${(metadataValidation.confidence * 100).toFixed(0)}% (${confidence}) | Performance Risk: ${metadataValidation.performanceRisk}`);
+        }
+        
         // Request permission if callback provided (debug mode)
         if (requestPermission) {
-          // For now, use medium confidence as default
-          // In future, could extract from Planner/SQLWriter responses
-          const preliminaryConfidence: 'high' | 'medium' | 'low' = 'medium';
-          
           const approved = await requestPermission(
             sql, 
             stepNumber, 
             plan.steps.length,
             hasSemantics,
-            preliminaryConfidence
+            confidence,
+            metadataValidation
           );
           
           if (!approved) {

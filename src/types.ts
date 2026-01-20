@@ -1,8 +1,32 @@
+export type GrainLevel = 
+  | 'row_level'
+  | 'customer_level' 
+  | 'order_level'
+  | 'daily'
+  | 'monthly'
+  | 'custom';
+
+export interface SQLValidationResult {
+  valid: boolean;
+  issues: string[];
+  confidence: number; // 0.0-1.0
+  facts: string[]; // Verified metadata facts
+  assumptions: string[]; // Explicit assumptions
+  unknowns: string[]; // Blocking vs non-blocking
+  grain?: GrainLevel;
+  performanceRisk: 'low' | 'medium' | 'high';
+  tablesValidated: boolean;
+  columnsValidated: boolean;
+  joinsValidated: boolean;
+}
+
 export interface PlanStep {
   stepNumber: number;
   description: string;
   sqlQuery?: string;
   reasoning: string;
+  grain?: GrainLevel;
+  validationResult?: SQLValidationResult;
 }
 
 export interface Plan {

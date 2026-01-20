@@ -16,6 +16,7 @@ export interface ValidationResult {
  * Safety checks performed:
  * - Only allows SELECT or WITH ... SELECT statements
  * - Rejects dangerous keywords (DROP, DELETE, INSERT, UPDATE, etc.)
+ * - Blocks SELECT * queries (zero hallucination rule - must list columns explicitly)
  * - Blocks queries with "undefined" table names (common LLM error)
  * - Prevents multiple statement execution
  * - Auto-appends LIMIT 200 if not present
@@ -61,6 +62,14 @@ export function validateSQL(sql: string): ValidationResult {
   
   if (!hasSelect && !hasWith) {
     return { valid: false, reason: 'Only SELECT or WITH ... SELECT statements are allowed' };
+  }
+  
+  // Check for SELECT * (zero hallucination rule)
+  if (/\bSELECT\s+\*\b/i.test(trimmed)) {
+    return { 
+      valid: false, 
+      reason: 'SELECT * is not allowed. Always list columns explicitly. This ensures zero hallucination and validates against metadata.' 
+    };
   }
   
   // Check for undefined table names (common LLM error)

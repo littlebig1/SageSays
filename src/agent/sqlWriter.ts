@@ -73,6 +73,37 @@ ${conversationHistory && conversationHistory.length > 0
 Current Step: ${step.description}
 Reasoning: ${step.reasoning}
 
+METADATA AS SOURCE OF TRUTH:
+1. ONLY use table names from metadata: ${tableNames}
+2. ONLY use column names that exist in the schema above
+3. If it's not in the metadata, it does not exist - DO NOT invent names
+4. Database metadata tables are the sole source of truth
+
+VALIDATION REQUIREMENTS:
+1. Validate all tables against metadata before generating SQL - check that every table name appears in the "Available table names" list
+2. Validate all columns exist for each table - verify each column name in the Database Schema section
+3. Validate all JOINs against foreign_keys metadata - use the Foreign keys section to ensure correct relationships
+4. Push WHERE filters before JOINs for performance - filter large tables early
+5. Use indexed columns for filtering when available - check the Indexes section for each table
+
+GRAIN MANAGEMENT:
+1. State the aggregation level explicitly in comments (e.g., -- Grain: customer_level)
+2. Ensure JOINs don't change the intended grain unintentionally
+3. Prefer canonical/pre-aggregated tables if grain matches - check metadata for summary tables (e.g., daily_summary, monthly_aggregates)
+4. If joining fact tables, ensure the grain is maintained or explicitly changed
+
+ZERO HALLUCINATION:
+1. NEVER use SELECT * - always list columns explicitly
+2. NEVER invent table or column names - if it's not in the schema, it doesn't exist
+3. NEVER create joins without FK validation - only join tables that have foreign key relationships in metadata
+4. NEVER use placeholders or "undefined" - always use actual table/column names from schema
+
+PERFORMANCE OPTIMIZATION:
+1. Assume large tables (check estimated_row_count) are expensive - tables with >100k rows need careful handling
+2. Push filters early (before JOINs) - apply WHERE clauses to large tables first
+3. Use indexed columns (check indexes JSONB) for WHERE clauses - prefer indexed columns for filtering
+4. Join smaller tables first (check total_size_bytes) - order JOINs by table size (smallest first)
+
 CRITICAL INSTRUCTIONS FOR BUSINESS SEMANTICS:
 1. If the user question contains ANY terms from Business Semantics (e.g., "yesterday", "this month", "revenue"):
    - You MUST use the EXACT "SQL Pattern" provided in that semantic definition
@@ -81,15 +112,10 @@ CRITICAL INSTRUCTIONS FOR BUSINESS SEMANTICS:
    - If an "AVOID" pattern is shown, you MUST NOT use that approach
    - Example: For "yesterday", use the provided SQL Pattern, not your own date calculation
 
-OPTIMIZATION GUIDELINES (if Table Metadata is provided):
-1. Use indexed columns for WHERE clauses when possible - check the Indexes section for each table
-2. Join smaller tables first - check estimated_row_count to determine table sizes
-3. Use primary keys for efficient lookups - see Primary key section for each table
-4. Leverage foreign key relationships for correct JOINs - see Foreign keys section
-5. Prefer UNIQUE indexes for equality checks
-
-2. DO NOT use "undefined", placeholders, or table names that are not in the schema.
-3. Look at the Database Schema section to find the correct table name and column names.
+FACTS vs ASSUMPTIONS vs UNKNOWNS:
+- Facts: Verified against metadata (table exists, column exists, FK valid) - state these explicitly
+- Assumptions: Explicit assumptions made (e.g., "assuming user_id is unique") - note these in comments
+- Unknowns: Things that couldn't be validated (e.g., "could not verify index usage") - flag these if critical
 
 Generate a single PostgreSQL SELECT query that:
 1. Uses ONLY table names from the "Available table names" list (${tableNames.split(', ').slice(0, 5).join(', ')}...)
@@ -100,6 +126,8 @@ Generate a single PostgreSQL SELECT query that:
 6. Uses appropriate JOINs, WHERE clauses, and aggregations as needed
 7. Optimizes query performance using metadata (indexes, table sizes, foreign keys) when available
 8. Does NOT include a LIMIT clause (it will be added automatically)
+9. Lists all columns explicitly (NEVER use SELECT *)
+10. Validates all elements against metadata before generating
 
 Respond with ONLY the SQL query, nothing else. No explanations, no markdown formatting, just the raw SQL.`;
 
