@@ -5,6 +5,131 @@
 
 ---
 
+## 📅 2026-01-20 (Early Morning) - Phase 3.1-3.2 Implementation & Bug Fixes 🐛✅
+
+**Goal**: Implement Phase 3 (Learning from User Corrections) with immediate approval workflow
+
+### What We Did ✅
+
+1. **Implemented Complete Phase 3.1-3.2** 🎉
+   - Created `CorrectionCapture` and `SemanticSuggestion` types
+   - Built `src/tools/corrections.ts` for correction storage
+   - Built `src/tools/suggestions.ts` for suggestion management
+   - Built `src/agent/semanticLearner.ts` for LLM-powered analysis
+   - Integrated correction detection in CLI (keyword-based)
+   - Implemented immediate approval workflow (Option B)
+   - Added `/review-suggestions` command for deferred review
+   - Updated orchestrator to return `run_log_id` for tracking
+
+2. **Created Comprehensive Test Plan**
+   - 8 test suites covering all functionality
+   - Test 1: Basic correction capture
+   - Test 2: Semantic learning (LLM analysis)
+   - Test 3: Immediate approval workflow
+   - Test 4: Rejection workflow
+   - Test 5: Deferred review
+   - Test 6: Edge cases
+   - Test 7: Integration tests
+   - Test 8: CLI commands
+
+3. **Fixed Critical Bug: CHECK Constraint Violation** 🐛
+   - **Error**: Test 1.3 failed with `error code 23514`
+   - **Root cause**: `learned_from` field used descriptive string instead of enum
+   - **Database constraint**: `CHECK (learned_from IN ('user_correction', 'pattern_analysis', 'frequency_analysis', 'explicit_teaching'))`
+   - **Fix**: Changed `semanticLearner.ts` to use `'user_correction'` enum value
+   - **Context moved**: Descriptive text moved to `learning_dialogue.context` field
+
+4. **Improved Documentation to Prevent Future Issues** 📚
+   - Added `LearnedFromSource` TypeScript type for type safety
+   - Updated `CONTROL_DB_SCHEMA.md` with:
+     - Explicit CHECK constraints in schema definition
+     - New "Critical Constraints & Enums" section
+     - Table of all enum constraints across tables
+   - Updated `DEVELOPMENT.md` with:
+     - New section "5. Database Constraints" with examples
+     - Best practices for working with CHECK constraints
+     - Warning about error code 23514
+   - Made constraints visible and discoverable
+
+### Technical Details
+
+**Files Created:**
+- `src/tools/corrections.ts` (107 lines)
+- `src/tools/suggestions.ts` (229 lines)
+- `src/agent/semanticLearner.ts` (176 lines)
+
+**Files Modified:**
+- `src/types.ts` - Added `CorrectionCapture`, `SemanticSuggestion`, `LearnedFromSource` types
+- `src/index.ts` - Added correction capture and immediate approval workflow
+- `src/agent/orchestrator.ts` - Returns `run_log_id` in response
+- `src/config.ts` - Added retry configuration
+- `docs/CONTROL_DB_SCHEMA.md` - Documented constraints
+- `docs/DEVELOPMENT.md` - Added database constraints best practices
+
+**Bug Fix Details:**
+```typescript
+// Before (❌ Fails CHECK constraint)
+learned_from: `User correction on query: "${correction.original_question}"`
+
+// After (✅ Passes CHECK constraint)
+learned_from: 'user_correction',
+learning_dialogue: {
+  // ... existing fields ...
+  context: `User correction on query: "${correction.original_question}"`
+}
+```
+
+### Key Learnings 🧠
+
+1. **Database constraints must be documented prominently**
+   - CHECK constraints are enforced at DB level
+   - TypeScript types should mirror DB constraints
+   - Both docs and code need to be in sync
+
+2. **Enum values should be in types, not inline strings**
+   - Created `LearnedFromSource` type for compile-time safety
+   - Prevents typos and invalid values
+
+3. **Context goes in JSONB, enums go in TEXT columns**
+   - Use enum columns for structured data/filtering
+   - Use JSONB for rich, descriptive context
+
+### Testing Status 🧪
+
+- ✅ Code compiles successfully
+- ✅ TypeScript types aligned with DB schema
+- ⏳ Manual testing in progress (Test 1.3 should now pass)
+- ⏳ Full test suite pending
+
+### Next Steps 🎯
+
+1. **Complete Manual Testing**
+   - Re-run Test 1.3 (should now pass)
+   - Continue through Test Suite 1-8
+   - Document any additional bugs
+
+2. **Phase 3.3: Pre-Execution Corrections**
+   - Allow corrections during debug mode approval
+   - Capture corrections before SQL execution
+   - Integrate with existing learning flow
+
+3. **Phase 4: Pattern Recognition** (Future)
+   - Automated learning from query logs
+   - Frequency analysis
+   - Pattern detection
+
+### Blockers & Issues 🚧
+
+- ~~CHECK constraint violation on `learned_from`~~ ✅ **FIXED**
+
+### Commands Run
+```bash
+npm run build          # ✅ Success after fix
+npm run dev           # Ready for testing
+```
+
+---
+
 ## 📅 2026-01-19 (Late Evening Part 8) - Semantic Storage Architecture 🏗️
 
 **Goal**: Finalize semantic storage design and database strategy before Phase 3

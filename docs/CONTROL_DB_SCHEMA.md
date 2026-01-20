@@ -117,12 +117,24 @@ CREATE TABLE semantic_suggestions (
   suggested_name TEXT NOT NULL,
   suggested_type TEXT NOT NULL,
   suggested_definition JSONB NOT NULL,    -- Full entity definition
-  learned_from TEXT NOT NULL,             -- Source of learning
+  learned_from TEXT NOT NULL              -- Source of learning (ENUM: see below)
+    CHECK (learned_from = ANY (ARRAY[
+      'user_correction'::text,           -- Learned from user correcting a query result
+      'pattern_analysis'::text,          -- Learned from analyzing query patterns
+      'frequency_analysis'::text,        -- Learned from frequency of similar queries
+      'explicit_teaching'::text          -- Manually taught by user/admin
+    ])),
   source_run_log_id UUID REFERENCES run_logs(id),
   learning_dialogue JSONB,                -- Conversation that led to suggestion
-  confidence NUMERIC NOT NULL,            -- Confidence score
+  confidence NUMERIC NOT NULL,            -- Confidence score (0.0 to 1.0)
   evidence JSONB,                         -- Supporting evidence
-  status TEXT DEFAULT 'pending',          -- 'pending', 'approved', 'rejected'
+  status TEXT DEFAULT 'pending'           -- 'pending', 'approved', 'rejected', 'needs_revision'
+    CHECK (status = ANY (ARRAY[
+      'pending'::text,
+      'approved'::text,
+      'rejected'::text,
+      'needs_revision'::text
+    ])),
   requires_expert_review BOOLEAN DEFAULT false,
   reviewed_by TEXT,
   review_notes TEXT,
@@ -131,7 +143,13 @@ CREATE TABLE semantic_suggestions (
 );
 
 CREATE INDEX idx_suggestions_status ON semantic_suggestions(status);
+CREATE INDEX idx_suggestions_learned_from ON semantic_suggestions(learned_from);
 ```
+
+**Important Constraints:**
+- `learned_from`: Must be one of the four predefined values (enforced by CHECK constraint)
+- `status`: Must be one of the four workflow states
+- `confidence`: Should be between 0.0 and 1.0 (validated in application code)
 
 ### Table: run_logs
 
@@ -217,6 +235,83 @@ Application interface → Database columns:
 | `category` | `category` or `entity_type` |
 | `term` | `name` |
 
+## Critical Constraints & Enums
+
+### ⚠️ Must Follow These Constraints in Code
+
+| Table | Column | Allowed Values | Type | Notes |
+|-------|--------|----------------|------|-------|
+| `semantic_entities` | `entity_type` | `'entity'`, `'metric'`, `'rule'`, `'time_period'`, `'anti_pattern'` | CHECK constraint | Lowercase with underscores |
+| `semantic_entities` | `source` | `'manual'`, `'learned'`, `'imported'`, `'system'` | CHECK constraint | |
+| `semantic_entities` | `aggregation` | `'COUNT'`, `'SUM'`, `'AVG'`, `'MIN'`, `'MAX'`, `'NONE'`, `NULL` | CHECK constraint | Uppercase |
+| `semantic_entities` | `confidence` | 0.0 to 1.0 | CHECK constraint | Numeric range |
+| `semantic_entities` | `(entity_type, name)` | Must be unique | UNIQUE INDEX | Can't duplicate names per type |
+| `semantic_suggestions` | `learned_from` | `'user_correction'`, `'pattern_analysis'`, `'frequency_analysis'`, `'explicit_teaching'` | CHECK constraint | |
+| `semantic_suggestions` | `status` | `'pending'`, `'approved'`, `'rejected'`, `'needs_review'` | CHECK constraint | Note: `'needs_review'` not `'needs_revision'` |
+| `semantic_suggestions` | `confidence` | 0.0 to 1.0 | CHECK constraint | Numeric range |
+| `run_logs` | `correction_type` | `'wrong_sql'`, `'wrong_result'`, `'wrong_interpretation'` | Application-enforced | Not DB constraint |
+| `run_logs` | `user_rating` | 1 to 5 | CHECK constraint | Integer range |
+
+**These constraints are enforced at the database level.** Attempting to insert values outside these enums will cause error code:
+- `23514` - CHECK constraint violation
+- `23505` - UNIQUE constraint violation
+
+**TypeScript Types:** These constraints are mirrored in `src/types.ts` as:
+- `EntityTypeDB` - Database entity types (lowercase)
+- `EntityTypeLLM` - LLM entity types (uppercase, mapped automatically)
+- `LLM_TO_DB_ENTITY_TYPE` - Mapping function
+- `SuggestionStatusDB` - Status values
+- `LearnedFromSource` - Learning sources
+- `AggregationDB` - Aggregation types
+- `SourceDB` - Semantic sources
+
+## Duplicate Handling Strategy
+
+### Unique Constraint on `semantic_entities`
+
+The database enforces a **UNIQUE constraint** on `(entity_type, name)`:
+```sql
+CREATE UNIQUE INDEX unique_name_per_type 
+ON semantic_entities (entity_type, name)
+```
+
+### Smart Duplicate Resolution
+
+When the AI generates a semantic name that already exists, the system **does NOT fail**. Instead, it:
+
+1. **Detects the duplicate** before attempting insert
+2. **Updates the existing semantic** with new information:
+   - Merges synonyms (array concatenation)
+   - Merges example_questions (array concatenation)
+   - Merges notes (array concatenation)
+   - Updates description if provided
+   - Updates SQL fragment if provided
+   - Updates confidence to higher value
+   - Increments `version` number
+   - Increments `usage_count` (tracks reinforcement)
+3. **Logs the merge** to console for transparency
+4. **Returns the existing semantic** (updated)
+
+This ensures that:
+- ✅ User corrections are never lost
+- ✅ Semantics get richer over time (accumulate knowledge)
+- ✅ Confidence increases with repeated corrections
+- ✅ No manual intervention needed
+- ✅ Natural deduplication
+
+**Example:**
+```
+Attempt 1: Create "yesterday" (time_period)
+  → Creates new semantic
+
+Attempt 2: Create "yesterday" (time_period) again
+  → Detects duplicate
+  → Merges new synonyms: ["past day", "previous day"]
+  → Updates confidence: 0.90 → 0.95
+  → Increments version: 1 → 2
+  → Result: Enhanced semantic, no error
+```
+
 ## Development Guidelines
 
 1. **Never modify the schema directly in production**
@@ -224,6 +319,8 @@ Application interface → Database columns:
 3. **Keep this documentation updated** when schema evolves
 4. **Follow naming conventions**: `snake_case` for columns, `UUID` for IDs
 5. **Leverage rich metadata fields** - use `synonyms`, `anti_patterns`, `complex_logic` for better learning
+6. **Always check constraint enums** before inserting data into tables with CHECK constraints
+7. **Trust the duplicate handler** - don't try to prevent duplicates in application code, let the DB-level handler manage it
 
 ## Viewing Current Schema
 

@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import { Config } from './types.js';
+import { RetryConfig } from './utils/retry.js';
 
 dotenv.config();
 
@@ -23,6 +24,14 @@ function getEnvNumber(name: string, defaultValue: number): number {
 
 export function loadConfig(): Config {
   const controlDbUrl = process.env.CONTROL_DB_URL;
+  
+  const retryConfig: RetryConfig = {
+    maxRetries: getEnvNumber('MAX_RETRIES', 3),
+    initialDelayMs: getEnvNumber('RETRY_INITIAL_DELAY_MS', 1000),
+    maxDelayMs: getEnvNumber('RETRY_MAX_DELAY_MS', 10000),
+    backoffMultiplier: 2,
+  };
+  
   return {
     geminiApiKey: getEnvVar('GEMINI_API_KEY'),
     databaseUrl: getEnvVar('DATABASE_URL'),
@@ -32,6 +41,7 @@ export function loadConfig(): Config {
     maxResultRowsForLLM: getEnvNumber('MAX_RESULT_ROWS_FOR_LLM', 50),
     geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
     debugModeConfidenceThreshold: getEnvNumber('DEBUG_MODE_CONFIDENCE_THRESHOLD', 95),
+    retry: retryConfig,
   };
 }
 

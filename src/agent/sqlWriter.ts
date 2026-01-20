@@ -28,7 +28,7 @@ export class SQLWriter {
     
     const schemaText = formatSchemaForLLM(schema);
     const semantics = await getSemantics();
-    const semanticsText = formatSemanticsForLLM(semantics);
+    const semanticsText = await formatSemanticsForLLM(semantics);
     
     // Extract table names for explicit reference
     const tableNames = schema.map(t => t.tableName).join(', ');
@@ -51,13 +51,20 @@ ${previousContext}User Question: ${question}
 Current Step: ${step.description}
 Reasoning: ${step.reasoning}
 
-2. If the user question contains terms from Business Semantics (e.g., "yesterday", "this month"), you MUST use those semantic definitions to generate the correct date/time filters.
-3. DO NOT use "undefined", placeholders, or table names that are not in the schema.
-4. Look at the Database Schema section to find the correct table name and column names.
+CRITICAL INSTRUCTIONS FOR BUSINESS SEMANTICS:
+1. If the user question contains ANY terms from Business Semantics (e.g., "yesterday", "this month", "revenue"):
+   - You MUST use the EXACT "SQL Pattern" provided in that semantic definition
+   - DO NOT create your own interpretation of time ranges, metrics, or business logic
+   - Copy the SQL Pattern directly and adapt column/table names to match the actual schema
+   - If an "AVOID" pattern is shown, you MUST NOT use that approach
+   - Example: For "yesterday", use the provided SQL Pattern, not your own date calculation
+
+2. DO NOT use "undefined", placeholders, or table names that are not in the schema.
+3. Look at the Database Schema section to find the correct table name and column names.
 
 Generate a single PostgreSQL SELECT query that:
 1. Uses ONLY table names from the "Available table names" list (${tableNames.split(', ').slice(0, 5).join(', ')}...)
-2. Applies semantic definitions for any terms mentioned in Business Semantics above
+2. Uses EXACT SQL Patterns from Business Semantics for any matching terms
 3. Only uses SELECT or WITH ... SELECT (no INSERT, UPDATE, DELETE, etc.)
 3. Is syntactically correct for PostgreSQL
 4. Answers the specific step described above

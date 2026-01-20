@@ -4,3 +4,9 @@ dist/
 data/schema_cache.json
 *.log
 .DS_Store
+
+# Cursor IDE files (should not be committed)
+.cursor/
+
+# Helper/temporary files
+helper files/

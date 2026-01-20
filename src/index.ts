@@ -4,7 +4,10 @@ import { getSchema, formatSchemaForLLM, clearSchemaCache } from './tools/schema.
 import { getInspectedDbPool, closeInspectedDbPool } from './tools/db.js';
 import { initializeControlDB, getSemantics, formatSemanticsForLLM } from './tools/semantics.js';
 import { config } from './config.js';
-import { DebugMode, confidenceToPercentage, meetsConfidenceThreshold } from './types.js';
+import { DebugMode, confidenceToPercentage, meetsConfidenceThreshold, CorrectionCapture, SemanticSuggestion } from './types.js';
+import { saveCorrection, getRunLogById } from './tools/corrections.js';
+import { saveSuggestion, approveSuggestion, rejectSuggestion, getPendingSuggestions } from './tools/suggestions.js';
+import { SemanticLearner } from './agent/semanticLearner.js';
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -13,6 +16,11 @@ const rl = readline.createInterface({
 
 // Global debug mode state - default to SMART
 let debugMode: DebugMode = 'smart';
+
+// Track last query for correction capture
+let lastQuestion: string = '';
+let lastRunLogId: string | undefined;
+let lastSqlQueries: string[] = [];
 
 function question(prompt: string): Promise<string> {
   return new Promise((resolve) => {
@@ -94,6 +102,15 @@ async function handleCommand(cmd: string, args: string[]): Promise<boolean> {
       return false;
     }
     
+    case '/review-suggestions': {
+      if (!config.controlDbUrl) {
+        console.log('\n⚠️  Control database not configured. Set CONTROL_DB_URL to use suggestions.\n');
+        return false;
+      }
+      await reviewPendingSuggestions();
+      return false;
+    }
+    
     case '/exit':
     case '/quit':
       return true;
@@ -108,8 +125,13 @@ Available commands:
   /refresh-schema          - Refresh the database schema cache
   /show-schema [table]     - Show database schema (optionally filtered by table)
   /show-semantics          - Show business semantics definitions
+  /review-suggestions      - Review pending semantic suggestions for approval
   /help                    - Show this help message
   /exit, /quit            - Exit the CLI
+
+Semantic Learning:
+  - Say "that's wrong" after a query to trigger correction capture
+  - Approve/reject suggestions immediately or use /review-suggestions later
 
 Ask a question to get started!
 `);
@@ -120,6 +142,197 @@ Ask a question to get started!
       console.log(`Unknown command: ${cmd}. Type /help for available commands.`);
       return false;
   }
+}
+
+/**
+ * Capture a post-execution correction from the user and trigger immediate learning.
+ * This is the main Phase 3 correction capture workflow.
+ */
+async function capturePostExecutionCorrection(
+  runLogId: string,
+  originalQuestion: string,
+  _sqlQueries: string[], // Prefixed with _ to indicate intentionally unused
+  _feedback: string // Prefixed with _ to indicate intentionally unused
+): Promise<void> {
+  console.log('\n🔍 I detected you\'re not satisfied with the result.');
+  console.log('\nWhat specifically was wrong?');
+  console.log('  1) The SQL query was incorrect');
+  console.log('  2) The result doesn\'t match reality');
+  console.log('  3) I misunderstood your question');
+  
+  const choice = await question('\nYour choice (1/2/3): ');
+  
+  const typeMap: Record<string, 'wrong_sql' | 'wrong_result' | 'wrong_interpretation'> = {
+    '1': 'wrong_sql',
+    '2': 'wrong_result',
+    '3': 'wrong_interpretation'
+  };
+  
+  const correctionType = typeMap[choice] || 'wrong_sql';
+  
+  console.log('\n📝 Please explain what was wrong:');
+  const explanation = await question('> ');
+  
+  // Get the run log details
+  const runLog = await getRunLogById(runLogId);
+  
+  if (!runLog) {
+    console.log('⚠️  Could not find run log. Correction not saved.\n');
+    return;
+  }
+  
+  const correction: CorrectionCapture = {
+    run_log_id: runLogId,
+    correction_stage: 'post_execution',
+    original_question: originalQuestion,
+    original_sql: runLog.sql_generated?.[0] || '', // First SQL query
+    user_feedback: explanation,
+    correction_type: correctionType
+  };
+  
+  // Save correction
+  try {
+    await saveCorrection(runLogId, correction);
+    console.log('\n✅ Correction saved.');
+  } catch (error) {
+    console.error('\n❌ Error saving correction:', error);
+    return;
+  }
+  
+  // Trigger immediate learning with LLM analysis
+  console.log('\n🧠 Analyzing your correction...');
+  
+  try {
+    const learner = new SemanticLearner();
+    const pool = getInspectedDbPool();
+    const client = await pool.connect();
+    let schema;
+    try {
+      schema = await getSchema(client);
+    } finally {
+      client.release();
+    }
+    const suggestionData = await learner.analyzeCorrection(runLog, correction, schema);
+    
+    if (!suggestionData) {
+      console.log('⚠️  Could not generate semantic suggestion from this correction.');
+      console.log('   Your feedback has been saved for future analysis.\n');
+      return;
+    }
+    
+    // Save suggestion to database
+    const suggestion = await saveSuggestion(suggestionData);
+    
+    if (!suggestion) {
+      console.log('⚠️  Could not save suggestion (control DB may not be configured).\n');
+      return;
+    }
+    
+    // Show immediate approval prompt
+    await showImmediateApprovalPrompt(suggestion);
+    
+  } catch (error) {
+    console.error('\n❌ Error during learning:', error);
+    console.log('   Your correction was saved, but semantic learning failed.\n');
+  }
+}
+
+/**
+ * Show immediate approval prompt for a semantic suggestion.
+ * This is the Option B workflow: immediate approval during the session.
+ */
+async function showImmediateApprovalPrompt(suggestion: SemanticSuggestion): Promise<void> {
+  console.log('\n💡 I learned a pattern from your correction:\n');
+  console.log('═'.repeat(60));
+  console.log(`Semantic: ${suggestion.suggested_name}`);
+  console.log(`Type: ${suggestion.suggested_type}`);
+  
+  const def = suggestion.suggested_definition;
+  const category = def.metadata?.category || 'General';
+  console.log(`Category: ${category}`);
+  console.log();
+  
+  console.log(`Description:`);
+  console.log(`  ${def.description}`);
+  console.log();
+  
+  if (def.sqlPattern) {
+    console.log(`SQL Pattern:`);
+    console.log(`  ${def.sqlPattern}`);
+    console.log();
+  }
+  
+  if (def.metadata?.synonyms && def.metadata.synonyms.length > 0) {
+    console.log(`Synonyms: ${def.metadata.synonyms.join(', ')}`);
+    console.log();
+  }
+  
+  if (def.metadata?.anti_patterns) {
+    const ap = def.metadata.anti_patterns;
+    console.log(`Common Mistake to Avoid:`);
+    console.log(`  Wrong: ${ap.wrong}`);
+    console.log(`  Why: ${ap.why}`);
+    console.log();
+  }
+  
+  console.log(`Confidence: ${(suggestion.confidence * 100).toFixed(0)}%`);
+  console.log('═'.repeat(60));
+  console.log();
+  
+  const response = await question('Is this correct? (y/n/later): ');
+  const choice = response.trim().toLowerCase();
+  
+  if (choice === 'y' || choice === 'yes') {
+    try {
+      await approveSuggestion(suggestion, 'user');
+      console.log('\n✅ Semantic saved! I\'ll use this knowledge from now on.\n');
+    } catch (error) {
+      console.error('\n❌ Error approving suggestion:', error);
+    }
+  } else if (choice === 'later' || choice === 'l') {
+    console.log('\n📝 Saved for later review. Use /review-suggestions to review.\n');
+  } else {
+    try {
+      await rejectSuggestion(suggestion.id, 'user', 'User rejected during immediate review');
+      console.log('\n❌ Suggestion rejected.\n');
+    } catch (error) {
+      console.error('\n❌ Error rejecting suggestion:', error);
+    }
+  }
+}
+
+/**
+ * Review pending semantic suggestions.
+ * This is the deferred approval workflow (Option A).
+ */
+async function reviewPendingSuggestions(): Promise<void> {
+  console.log('\n📋 Fetching pending suggestions...\n');
+  
+  const suggestions = await getPendingSuggestions();
+  
+  if (suggestions.length === 0) {
+    console.log('✅ No pending suggestions to review!\n');
+    return;
+  }
+  
+  console.log(`Found ${suggestions.length} pending suggestion(s):\n`);
+  
+  for (let i = 0; i < suggestions.length; i++) {
+    const suggestion = suggestions[i];
+    
+    console.log(`\n${'═'.repeat(60)}`);
+    console.log(`Suggestion ${i + 1} of ${suggestions.length}`);
+    console.log('═'.repeat(60));
+    
+    await showImmediateApprovalPrompt(suggestion);
+    
+    // Continue to next suggestion
+    if (i < suggestions.length - 1) {
+      console.log('Moving to next suggestion...\n');
+    }
+  }
+  
+  console.log('\n✅ All suggestions reviewed!\n');
 }
 
 async function main() {
@@ -175,6 +388,18 @@ async function main() {
     
     if (!trimmed) {
       continue;
+    }
+    
+    // Check for correction keywords
+    const correctionKeywords = [
+      'wrong', 'incorrect', 'not right', "that's wrong",
+      'not correct', 'nope', 'bad result', "that's incorrect",
+      'that is wrong', 'that is incorrect'
+    ];
+    
+    if (correctionKeywords.some(kw => trimmed.toLowerCase().includes(kw)) && lastRunLogId) {
+      await capturePostExecutionCorrection(lastRunLogId, lastQuestion, lastSqlQueries, trimmed);
+      continue; // Don't treat as new question
     }
     
     // Check if it's a command
@@ -264,9 +489,18 @@ async function main() {
       
       if (cancelled) {
         console.log('⚠️  Execution cancelled. Context has been reset.\n');
+        // Reset tracking on cancellation
+        lastQuestion = '';
+        lastRunLogId = undefined;
+        lastSqlQueries = [];
       } else {
         console.log(`\n💡 Answer:\n${answer}\n`);
         console.log(`📊 Summary: ${logs.steps} steps, ${logs.queries} queries, ${logs.totalRows} total rows, ${logs.totalDuration}ms total\n`);
+        
+        // Track for correction capture
+        lastQuestion = trimmed;
+        lastRunLogId = logs.runLogId;
+        // Note: SQL queries are tracked in orchestrator, we'll get them from run_log if needed
       }
     } catch (error) {
       console.error(`\n✗ Error: ${error instanceof Error ? error.message : String(error)}\n`);

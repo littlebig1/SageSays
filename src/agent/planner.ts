@@ -23,7 +23,7 @@ export class Planner {
   ): Promise<Plan> {
     const schemaText = formatSchemaForLLM(schema);
     const semantics = await getSemantics();
-    const semanticsText = formatSemanticsForLLM(semantics);
+    const semanticsText = await formatSemanticsForLLM(semantics);
     
     const context = previousSteps 
       ? `Previous steps taken:\n${previousSteps.map(s => `Step ${s.stepNumber}: ${s.description}${s.sqlQuery ? `\nSQL: ${s.sqlQuery}` : ''}`).join('\n\n')}\n\n`
@@ -38,9 +38,17 @@ ${semanticsText}
 
 ${context}User Question: ${question}
 
-IMPORTANT: Review the Business Semantics above. If the user's question contains any terms defined in the semantics (e.g., "yesterday", "this month"), use those exact definitions when planning your steps.
+CRITICAL PLANNING RULES:
+1. Review the Business Semantics above - these provide pre-built SQL patterns for specific terms
+2. If the user's question can be answered with a SINGLE query (count/filter/aggregate with semantics), use ONLY ONE step
+3. Only create multiple steps when TRULY necessary:
+   - Complex subqueries requiring intermediate results
+   - Multiple independent aggregations to be combined
+   - Data from one query needed to filter another query
+4. DO NOT decompose simple queries into multiple conceptual steps (select, filter, count)
+5. When semantics provide SQL patterns for time periods, metrics, or business rules, incorporate them directly into a single step
 
-Create a detailed plan with multiple steps. Each step should:
+Each step should:
 1. Have a clear description of what data to retrieve
 2. Include reasoning for why this step is needed
 3. Be numbered sequentially

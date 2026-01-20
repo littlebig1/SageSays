@@ -177,6 +177,19 @@ npx tsx scripts/test-semantic-detection.ts
   - [ ] Set `reviewed_at` timestamp
   - [ ] Set `status` ('approved' / 'rejected')
 
+  📋 Phase 3.3 Checklist (Future Reference)
+When implementing Phase 3.3, address:
+[ ] Don't reset context on query rejection
+[ ] Create run_log entry for rejected queries
+[ ] Add execution_status column to run_logs
+[ ] Modify correction capture to handle missing execution data
+[ ] Update correction prompt after rejection
+[ ] Add /edit option to debug mode prompt
+[ ] Test pre-execution correction flow
+[ ] Update documentation
+[ ] Update test plan
+
+
 **Success Criteria**:
 - ✅ System detects corrections
 - ✅ Extracts semantic patterns automatically

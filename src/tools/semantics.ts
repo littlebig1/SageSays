@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { Semantic, SemanticEntity } from '../types.js';
+import { Semantic, EntityTypeDB, SourceDB, SemanticAdditionalData, mapToDBEntityType } from '../types.js';
 import { config } from '../config.js';
 
 const { Pool } = pg;
@@ -21,66 +21,162 @@ function getControlDbPool(): pg.Pool | null {
 }
 
 /**
- * Initializes the control database with the official schema.
- * For full schema documentation, see docs/CONTROL_DB_SCHEMA.md
- * 
- * NOTE: This creates a minimal subset of tables. For complete setup,
- * use: npm run init-control-db
+ * Initialize the control database with semantic_entities and run_logs tables.
+ * This function is idempotent - safe to call multiple times.
  */
 export async function initializeControlDB(): Promise<void> {
-  if (!config.controlDbUrl) {
-    console.log('⚠️  CONTROL_DB_URL not set - skipping control database initialization');
-    return;
-  }
   const pool = getControlDbPool();
   if (!pool) {
+    console.log('⚠️  CONTROL_DB_URL not set - skipping control database initialization');
     return;
   }
   const client = await pool.connect();
   
   try {
-    // Create semantic_entities table with official schema (matching actual database)
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS semantic_entities (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        entity_type VARCHAR(50) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        category TEXT NOT NULL,
-        description TEXT NOT NULL,
-        primary_table TEXT,
-        primary_column TEXT,
-        sql_fragment TEXT,
-        example_values TEXT,
-        parent_id UUID REFERENCES semantic_entities(id) ON DELETE CASCADE,
-        metadata JSONB DEFAULT '{}',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+    // Note: Tables are assumed to exist (created by user's schema)
+    // This function could be expanded to create tables if needed
+    console.log('Control database connection verified');
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Check if a semantic entity already exists with the given name and type.
+ * 
+ * @param name The semantic name
+ * @param entityType The entity type
+ * @returns The existing semantic if found, null otherwise
+ */
+export async function findExistingSemantic(
+  name: string,
+  entityType: EntityTypeDB
+): Promise<Semantic | null> {
+  const pool = getControlDbPool();
+  if (!pool) return null;
+  
+  const client = await pool.connect();
+  
+  try {
+    const result = await client.query(
+      `SELECT 
+        id, 
+        entity_type, 
+        name, 
+        category,
+        description, 
+        primary_table,
+        primary_column,
+        created_at,
+        version
+      FROM semantic_entities
+      WHERE name = $1 AND entity_type = $2
+      LIMIT 1`,
+      [name, entityType]
+    );
     
-    // Create run_logs table with official schema (matching actual database)
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS run_logs (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        question TEXT NOT NULL,
-        sql_generated TEXT[] NOT NULL,
-        sql_executed TEXT[],
-        rows_returned INT[] NOT NULL,
-        durations_ms INT[] NOT NULL,
-        success BOOLEAN DEFAULT true,
-        error_message TEXT,
-        user_feedback TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+    if (result.rows.length === 0) {
+      return null;
+    }
     
-    // Create indexes (using correct column names)
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_semantic_entities_type ON semantic_entities(entity_type);
-      CREATE INDEX IF NOT EXISTS idx_semantic_entities_name ON semantic_entities(name);
-      CREATE INDEX IF NOT EXISTS idx_semantic_entities_table ON semantic_entities(primary_table);
-      CREATE INDEX IF NOT EXISTS idx_run_logs_created ON run_logs(created_at DESC);
-    `);
+    const row = result.rows[0];
+    return {
+      id: row.id,
+      category: row.category || row.entity_type,
+      term: row.name,
+      description: row.description,
+      tableName: row.primary_table || undefined,
+      columnName: row.primary_column || undefined,
+      createdAt: new Date(row.created_at),
+    };
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Update an existing semantic entity with new information from learning.
+ * This is used when AI generates a duplicate name - we merge/update instead of failing.
+ * 
+ * @param existingId ID of existing semantic
+ * @param updates New information to merge
+ * @returns Updated semantic
+ */
+export async function updateSemanticFromLearning(
+  existingId: string,
+  updates: {
+    description?: string;
+    sqlFragment?: string;
+    synonyms?: string[];
+    antiPatterns?: any;
+    exampleQuestions?: string[];
+    notes?: string[];
+    confidence?: number;
+  }
+): Promise<void> {
+  const pool = getControlDbPool();
+  if (!pool) return;
+  
+  const client = await pool.connect();
+  
+  try {
+    // Build dynamic UPDATE based on what fields are provided
+    const setClauses: string[] = [];
+    const values: any[] = [];
+    let paramIndex = 1;
+    
+    if (updates.description) {
+      setClauses.push(`description = $${paramIndex++}`);
+      values.push(updates.description);
+    }
+    
+    if (updates.sqlFragment) {
+      setClauses.push(`sql_fragment = $${paramIndex++}`);
+      values.push(updates.sqlFragment);
+    }
+    
+    if (updates.synonyms) {
+      // Merge with existing synonyms (array concatenation)
+      setClauses.push(`synonyms = array_cat(COALESCE(synonyms, '{}'), $${paramIndex++}::text[])`);
+      values.push(updates.synonyms);
+    }
+    
+    if (updates.antiPatterns) {
+      setClauses.push(`anti_patterns = $${paramIndex++}`);
+      values.push(JSON.stringify(updates.antiPatterns));
+    }
+    
+    if (updates.exampleQuestions) {
+      setClauses.push(`example_questions = array_cat(COALESCE(example_questions, '{}'), $${paramIndex++}::text[])`);
+      values.push(updates.exampleQuestions);
+    }
+    
+    if (updates.notes) {
+      setClauses.push(`notes = array_cat(COALESCE(notes, '{}'), $${paramIndex++}::text[])`);
+      values.push(updates.notes);
+    }
+    
+    if (updates.confidence !== undefined) {
+      // Update confidence if new one is higher
+      setClauses.push(`confidence = GREATEST(COALESCE(confidence, 0), $${paramIndex++})`);
+      values.push(updates.confidence);
+    }
+    
+    // Always increment version and update timestamp
+    setClauses.push('version = version + 1');
+    setClauses.push('updated_at = CURRENT_TIMESTAMP');
+    setClauses.push('usage_count = usage_count + 1'); // Track that it was reinforced
+    
+    values.push(existingId);
+    
+    await client.query(
+      `UPDATE semantic_entities 
+       SET ${setClauses.join(', ')}
+       WHERE id = $${paramIndex}`,
+      values
+    );
+    
+    console.log(`   ✓ Updated existing semantic (ID: ${existingId}) with new learning`);
   } finally {
     client.release();
   }
@@ -88,24 +184,87 @@ export async function initializeControlDB(): Promise<void> {
 
 /**
  * Saves a new semantic definition to the control database.
- * Uses the official schema: semantic_entities table.
+ * Handles duplicate names intelligently:
+ * - If duplicate exists, updates it with new information
+ * - If new, creates a new semantic entity
  * 
  * @param semantic The semantic object to save
- * @returns The saved Semantic object with id and createdAt
+ * @param source Source of the semantic ('manual', 'learned', etc.)
+ * @param confidence Confidence score (0.0 to 1.0)
+ * @param additionalData Optional additional fields
+ * @param explicitEntityType Optional: LLM entity type to use for mapping (e.g., 'TIME_PERIOD')
+ * @returns The saved or updated Semantic object
  */
-export async function saveSemantic(semantic: Omit<Semantic, 'id' | 'createdAt'>): Promise<Semantic> {
+export async function saveSemantic(
+  semantic: Omit<Semantic, 'id' | 'createdAt'>,
+  source: SourceDB = 'manual',
+  confidence?: number,
+  additionalData?: SemanticAdditionalData,
+  explicitEntityType?: string
+): Promise<Semantic> {
   const pool = getControlDbPool();
   if (!pool) {
     throw new Error('Control database not configured. Set CONTROL_DB_URL in .env');
   }
+  
+  // Map the entity type to database format
+  // Use explicit type if provided (from LLM suggestion), otherwise try to map from category
+  const entityType = explicitEntityType 
+    ? mapToDBEntityType(explicitEntityType)
+    : mapToDBEntityType(semantic.category);
+  
+  // Check if duplicate exists
+  const existing = await findExistingSemantic(semantic.term, entityType);
+  
+  if (existing) {
+    // Duplicate found - update instead of creating
+    console.log(`   ⚠️  Semantic "${semantic.term}" (type: ${entityType}) already exists`);
+    console.log(`   📝 Merging new information into existing semantic...`);
+    
+    await updateSemanticFromLearning(existing.id, {
+      description: semantic.description,
+      sqlFragment: additionalData?.sqlFragment,
+      synonyms: additionalData?.synonyms,
+      antiPatterns: additionalData?.antiPatterns,
+      exampleQuestions: additionalData?.exampleQuestions,
+      notes: additionalData?.notes,
+      confidence: confidence,
+    });
+    
+    return existing; // Return existing semantic (caller should handle that it was merged)
+  }
+  
+  // No duplicate - create new semantic
   const client = await pool.connect();
   
   try {
     const result = await client.query(
-      `INSERT INTO semantic_entities (entity_type, category, name, description, primary_table, primary_column)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, entity_type, category, name, description, primary_table, primary_column, created_at`,
-      [semantic.category, semantic.category, semantic.term, semantic.description, semantic.tableName || null, semantic.columnName || null]
+      `INSERT INTO semantic_entities (
+        entity_type, category, name, description,
+        primary_table, primary_column, sql_fragment,
+        synonyms, anti_patterns, example_questions, notes,
+        aggregation, source, confidence,
+        approved, approved_by
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+      RETURNING id, entity_type, category, name, description, primary_table, primary_column, created_at`,
+      [
+        entityType,
+        semantic.category,
+        semantic.term,
+        semantic.description,
+        semantic.tableName || null,
+        semantic.columnName || null,
+        additionalData?.sqlFragment || null,
+        additionalData?.synonyms || [],
+        additionalData?.antiPatterns ? JSON.stringify(additionalData.antiPatterns) : null,
+        additionalData?.exampleQuestions || [],
+        additionalData?.notes || [],
+        additionalData?.aggregation || null,
+        source,
+        confidence || 1.00,
+        true, // approved = true when creating from approved suggestion
+        additionalData?.approvedBy || null
+      ]
     );
     
     const row = result.rows[0];
@@ -118,6 +277,26 @@ export async function saveSemantic(semantic: Omit<Semantic, 'id' | 'createdAt'>)
       columnName: row.primary_column || undefined,
       createdAt: new Date(row.created_at),
     };
+  } catch (error: any) {
+    // Catch unique constraint violation as backup
+    if (error.code === '23505') {
+      console.warn(`   ⚠️  Race condition: Semantic "${semantic.term}" was created by another process`);
+      // Re-check and update
+      const existing = await findExistingSemantic(semantic.term, entityType);
+      if (existing) {
+        await updateSemanticFromLearning(existing.id, {
+          description: semantic.description,
+          sqlFragment: additionalData?.sqlFragment,
+          synonyms: additionalData?.synonyms,
+          antiPatterns: additionalData?.antiPatterns,
+          exampleQuestions: additionalData?.exampleQuestions,
+          notes: additionalData?.notes,
+          confidence: confidence,
+        });
+        return existing;
+      }
+    }
+    throw error;
   } finally {
     client.release();
   }
@@ -147,27 +326,31 @@ export async function getSemantics(category?: string, term?: string): Promise<Se
         name, 
         category,
         description, 
-        primary_table, 
-        primary_column, 
-        created_at 
-      FROM semantic_entities 
+        primary_table,
+        primary_column,
+        sql_fragment,
+        synonyms,
+        anti_patterns,
+        example_questions,
+        notes,
+        aggregation,
+        created_at
+      FROM semantic_entities
       WHERE 1=1
     `;
     const params: any[] = [];
-    let paramIndex = 1;
     
     if (category) {
-      query += ` AND (entity_type = $${paramIndex} OR category = $${paramIndex})`;
-      paramIndex++;
       params.push(category);
+      query += ` AND (entity_type = $${params.length} OR category = $${params.length})`;
     }
     
     if (term) {
-      query += ` AND name = $${paramIndex++}`;
       params.push(term);
+      query += ` AND name = $${params.length}`;
     }
     
-    query += ' ORDER BY entity_type, name';
+    query += ' ORDER BY usage_count DESC, name ASC';
     
     const result = await client.query(query, params);
     
@@ -179,6 +362,13 @@ export async function getSemantics(category?: string, term?: string): Promise<Se
       tableName: row.primary_table || undefined,
       columnName: row.primary_column || undefined,
       createdAt: new Date(row.created_at),
+      // Rich metadata fields
+      sqlFragment: row.sql_fragment || undefined,
+      synonyms: row.synonyms || undefined,
+      antiPatterns: row.anti_patterns || undefined,
+      exampleQuestions: row.example_questions || undefined,
+      notes: row.notes || undefined,
+      aggregation: row.aggregation || undefined,
     }));
   } finally {
     client.release();
@@ -186,133 +376,101 @@ export async function getSemantics(category?: string, term?: string): Promise<Se
 }
 
 /**
- * Gets semantic entities with full details from the enhanced schema.
- * Returns all fields from the official semantic_entities table.
+ * Format semantics for LLM context in a clear, readable format.
+ * Includes all rich metadata, especially SQL patterns, to guide LLM in generating correct queries.
  * 
- * @param entityType Optional filter by entity_type
- * @returns Array of SemanticEntity objects with all fields
+ * @param semantics Array of semantic definitions
+ * @returns Formatted string for LLM prompt
  */
-export async function getSemanticEntities(entityType?: string): Promise<SemanticEntity[]> {
-  const pool = getControlDbPool();
-  if (!pool) {
-    return [];
-  }
-  const client = await pool.connect();
-  
-  try {
-    let query = `
-      SELECT 
-        id, 
-        entity_type, 
-        name, 
-        category,
-        description, 
-        primary_table, 
-        primary_column, 
-        sql_fragment, 
-        synonyms,
-        aggregation,
-        complex_logic,
-        created_at, 
-        updated_at 
-      FROM semantic_entities 
-      WHERE 1=1
-    `;
-    const params: any[] = [];
-    
-    if (entityType) {
-      query += ` AND entity_type = $1`;
-      params.push(entityType);
-    }
-    
-    query += ' ORDER BY entity_type, name';
-    
-    const result = await client.query(query, params);
-    
-    return result.rows.map(row => ({
-      id: row.id,
-      entityType: row.entity_type,
-      name: row.name,
-      description: row.description,
-      tableName: row.primary_table || undefined,
-      columnName: row.primary_column || undefined,
-      sqlPattern: row.sql_fragment || undefined,
-      exampleValues: row.synonyms?.join(', ') || undefined,
-      parentId: undefined, // Not using parent_id in current schema
-      metadata: row.complex_logic || undefined,
-      createdAt: new Date(row.created_at),
-      updatedAt: new Date(row.updated_at),
-    }));
-  } finally {
-    client.release();
-  }
-}
-
-/**
- * Detects which semantics are relevant to a given question.
- * Uses simple keyword matching on term names.
- * 
- * @param question The user's question
- * @returns Array of semantic entity IDs that are relevant
- */
-export async function detectSemantics(question: string): Promise<string[]> {
-  const semantics = await getSemantics();
-  if (semantics.length === 0) {
-    return [];
-  }
-  
-  const questionLower = question.toLowerCase();
-  const detectedIds: string[] = [];
-  
-  for (const semantic of semantics) {
-    // Check if the exact term appears in the question (with word boundaries)
-    const termLower = semantic.term.toLowerCase();
-    
-    // Use word boundary matching to avoid partial matches
-    // e.g., "yesterday" should match "yesterday" but not "yesterdays"
-    const regex = new RegExp(`\\b${termLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-    
-    if (regex.test(questionLower)) {
-      detectedIds.push(semantic.id);
-    }
-  }
-  
-  return detectedIds;
-}
-
 export async function formatSemanticsForLLM(semantics: Semantic[]): Promise<string> {
   if (semantics.length === 0) {
-    return '';
+    return 'Business Semantics: No business semantics defined yet.';
   }
+
+  let output = 'Business Semantics:\n\n';
   
-  const parts: string[] = [
-    '=== BUSINESS SEMANTICS ===',
-    'Use these definitions to correctly interpret the user\'s question:',
-    ''
-  ];
+  // Group by category
+  const grouped = semantics.reduce((acc, semantic) => {
+    const cat = semantic.category || 'General';
+    if (!acc[cat]) acc[cat] = [];
+    acc[cat].push(semantic);
+    return acc;
+  }, {} as Record<string, Semantic[]>);
   
-  const byCategory = new Map<string, Semantic[]>();
-  for (const sem of semantics) {
-    if (!byCategory.has(sem.category)) {
-      byCategory.set(sem.category, []);
-    }
-    byCategory.get(sem.category)!.push(sem);
-  }
-  
-  for (const [category, items] of byCategory.entries()) {
-    parts.push(`${category}:`);
-    for (const item of items) {
-      parts.push(`  • "${item.term}": ${item.description}`);
-      if (item.tableName && item.columnName) {
-        parts.push(`    Database mapping: ${item.tableName}.${item.columnName}`);
-      } else if (item.tableName) {
-        parts.push(`    Related table: ${item.tableName}`);
+  for (const [category, items] of Object.entries(grouped)) {
+    output += `${category}:\n`;
+    for (const semantic of items) {
+      output += `  - ${semantic.term}: ${semantic.description}\n`;
+      
+      // SQL Fragment (most important!)
+      if (semantic.sqlFragment) {
+        output += `    SQL Pattern: ${semantic.sqlFragment}\n`;
       }
+      
+      // Table/column reference
+      if (semantic.tableName) {
+        output += `    Table: ${semantic.tableName}`;
+        if (semantic.columnName) {
+          output += `, Column: ${semantic.columnName}`;
+        }
+        output += '\n';
+      }
+      
+      // Aggregation for metrics
+      if (semantic.aggregation) {
+        output += `    Aggregation: ${semantic.aggregation}\n`;
+      }
+      
+      // Synonyms
+      if (semantic.synonyms && semantic.synonyms.length > 0) {
+        output += `    Synonyms: ${semantic.synonyms.join(', ')}\n`;
+      }
+      
+      // Anti-patterns (what NOT to do)
+      if (semantic.antiPatterns) {
+        output += `    AVOID: ${semantic.antiPatterns.wrong}\n`;
+        output += `    Reason: ${semantic.antiPatterns.why}\n`;
+        if (semantic.antiPatterns.correct) {
+          output += `    Use instead: ${semantic.antiPatterns.correct}\n`;
+        }
+      }
+      
+      // Example questions
+      if (semantic.exampleQuestions && semantic.exampleQuestions.length > 0) {
+        output += `    Examples: ${semantic.exampleQuestions.join('; ')}\n`;
+      }
+      
+      // Notes
+      if (semantic.notes && semantic.notes.length > 0) {
+        output += `    Notes: ${semantic.notes.join('; ')}\n`;
+      }
+      
+      output += '\n';
     }
-    parts.push(''); // Empty line between categories
   }
   
-  parts.push('IMPORTANT: When you see these terms in questions, use the definitions above.\n');
+  return output.trim();
+}
+
+/**
+ * Detect which semantics are relevant to a given question.
+ * Simple keyword matching for now (can be enhanced with embeddings later).
+ * 
+ * @param question User's question
+ * @returns Array of semantic IDs that were detected
+ */
+export async function detectSemantics(question: string): Promise<string[]> {
+  const allSemantics = await getSemantics();
+  const questionLower = question.toLowerCase();
+  const detected: string[] = [];
   
-  return parts.join('\n');
+  for (const semantic of allSemantics) {
+    // Check if semantic term appears in question
+    const termLower = semantic.term.toLowerCase();
+    if (questionLower.includes(termLower)) {
+      detected.push(semantic.id);
+    }
+  }
+  
+  return detected;
 }

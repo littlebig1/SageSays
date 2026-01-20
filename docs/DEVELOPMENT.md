@@ -315,6 +315,125 @@ const apiKey = config.geminiApiKey;
 const apiKey = process.env.GEMINI_API_KEY;
 ```
 
+### 5. Database Constraints ⚠️
+
+**CRITICAL: Always use enum values that match database CHECK constraints**
+
+The control database has CHECK constraints on several columns. Using invalid values will cause `error code 23514` (check constraint violation).
+
+**Example - semantic_suggestions.learned_from:**
+
+```typescript
+import { LearnedFromSource } from '../types.js';
+
+// ✅ Good - uses TypeScript enum
+const suggestion: Partial<SemanticSuggestion> = {
+  learned_from: 'user_correction', // Valid enum value
+  // ...
+};
+
+// ❌ Bad - dynamic string will fail
+const suggestion = {
+  learned_from: `User corrected query: "${question}"`, // ❌ CHECK constraint violation!
+  // ...
+};
+```
+
+**Required enum values (see `CONTROL_DB_SCHEMA.md` for complete list):**
+- `learned_from`: `'user_correction'` | `'pattern_analysis'` | `'frequency_analysis'` | `'explicit_teaching'`
+- `status`: `'pending'` | `'approved'` | `'rejected'` | `'needs_review'` (NOT `'needs_revision'`!)
+- `correction_type`: `'wrong_sql'` | `'wrong_result'` | `'wrong_interpretation'`
+- `entity_type`: `'entity'` | `'metric'` | `'rule'` | `'time_period'` | `'anti_pattern'` (lowercase!)
+- `source`: `'manual'` | `'learned'` | `'imported'` | `'system'`
+
+**Best Practice:**
+1. Always use the TypeScript types defined in `src/types.ts`
+2. Store descriptive context in JSONB fields (e.g., `learning_dialogue`, `evidence`)
+3. Never hardcode strings for enum columns
+4. Check `CONTROL_DB_SCHEMA.md` before adding new data insertion code
+
+### 6. Type Mapping (LLM ↔ Database) 🔄
+
+**The Problem:**
+- LLM generates: `'TIME_PERIOD'`, `'METRIC'`, `'DIMENSION'` (uppercase, user-friendly)
+- Database expects: `'time_period'`, `'metric'`, `'entity'` (lowercase, DB convention)
+
+**The Solution:**
+```typescript
+import { mapToDBEntityType, EntityTypeLLM, EntityTypeDB } from '../types.js';
+
+// ✅ Automatic mapping
+const llmType: EntityTypeLLM = 'TIME_PERIOD';
+const dbType: EntityTypeDB = mapToDBEntityType(llmType); // 'time_period'
+
+// Mapping table
+const LLM_TO_DB_ENTITY_TYPE = {
+  'TIME_PERIOD': 'time_period',
+  'METRIC': 'metric',
+  'DIMENSION': 'entity',
+  'BUSINESS_RULE': 'rule',
+  'FIELD_DEFINITION': 'entity',
+  'ANTI_PATTERN': 'anti_pattern',
+};
+```
+
+**When to use:**
+- ✅ Always use `EntityTypeLLM` in prompts and LLM responses
+- ✅ Always use `EntityTypeDB` when inserting to database
+- ✅ Use `mapToDBEntityType()` to convert between them
+- ❌ Never mix the two types
+
+### 7. Duplicate Semantic Handling 🔁
+
+**The Challenge:**
+AI might generate a semantic name that already exists (e.g., "yesterday").
+
+**Our Solution: Smart Merge (Not Failure)**
+
+The `saveSemantic()` function:
+1. Checks if semantic already exists (same name + type)
+2. If exists: **Updates** existing with new info (merges arrays, increments version)
+3. If new: **Creates** new semantic
+
+```typescript
+// This NEVER throws a duplicate error
+await saveSemantic(
+  { category: 'Time Periods', term: 'yesterday', description: '...' },
+  'learned',
+  0.90,
+  {
+    synonyms: ['past day', 'previous day'],
+    sqlFragment: 'date >= CURRENT_DATE - 1',
+    // ...
+  }
+);
+
+// Result if "yesterday" exists:
+//   ✅ Merges synonyms with existing
+//   ✅ Updates confidence if higher
+//   ✅ Increments version
+//   ✅ Logs the merge
+//   ✅ Returns updated semantic
+```
+
+**Benefits:**
+- ✅ User corrections never lost
+- ✅ Semantics accumulate knowledge over time
+- ✅ No manual intervention needed
+- ✅ Natural deduplication
+
+**What NOT to do:**
+```typescript
+// ❌ Don't check for duplicates yourself
+const existing = await findExistingSemantic(...);
+if (existing) {
+  throw new Error('Duplicate!'); // Bad!
+}
+
+// ✅ Just call saveSemantic - it handles everything
+await saveSemantic(...);
+```
+
 ---
 
 ## Anti-Patterns to Avoid

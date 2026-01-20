@@ -211,8 +211,12 @@ export class Orchestrator {
     }
     
     // Save run log with detected semantics (optional - only if control DB is configured)
+    let runLogId: string | undefined;
     try {
-      await saveRunLog(question, sqlQueries, rowsReturned, durationsMs, detectedSemanticIds);
+      const runLog = await saveRunLog(question, sqlQueries, rowsReturned, durationsMs, detectedSemanticIds);
+      if (runLog) {
+        runLogId = runLog.id;
+      }
     } catch (error) {
       // Silently ignore - control DB is optional
     }
@@ -224,6 +228,7 @@ export class Orchestrator {
         queries: sqlQueries.length,
         totalRows: rowsReturned.reduce((a, b) => a + b, 0),
         totalDuration: durationsMs.reduce((a, b) => a + b, 0),
+        runLogId, // Include run_log_id for corrections
       },
       cancelled: false,
     };
