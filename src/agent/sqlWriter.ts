@@ -1,9 +1,8 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { PlanStep, TableSchema } from '../types.js';
+import { PlanStep, TableSchema, ConversationTurn } from '../types.js';
 import { config } from '../config.js';
-import { formatSchemaForLLM } from '../tools/schema.js';
-import { formatSemanticsForLLM } from '../tools/semantics.js';
-import { getSemantics } from '../tools/semantics.js';
+import { formatSchemaForLLM } from '../tools/inspectedDb.js';
+import { formatSemanticsForLLM, getSemantics, formatMetadataForLLM } from '../tools/controlDb.js';
 import { retryWithBackoff } from '../utils/retry.js';
 
 export class SQLWriter {
@@ -19,7 +18,8 @@ export class SQLWriter {
     step: PlanStep,
     question: string,
     schema: TableSchema[],
-    previousResults?: Array<{ step: number; result: any }>
+    previousResults?: Array<{ step: number; result: any }>,
+    conversationHistory?: ConversationTurn[]
   ): Promise<string> {
     // Validate schema is not empty
     if (!schema || schema.length === 0) {
@@ -29,6 +29,7 @@ export class SQLWriter {
     const schemaText = formatSchemaForLLM(schema);
     const semantics = await getSemantics();
     const semanticsText = await formatSemanticsForLLM(semantics);
+    const metadataText = formatMetadataForLLM(schema);
     
     // Extract table names for explicit reference
     const tableNames = schema.map(t => t.tableName).join(', ');
@@ -37,16 +38,37 @@ export class SQLWriter {
       ? `\nPrevious query results:\n${previousResults.map(pr => `Step ${pr.step}: ${JSON.stringify(pr.result.rows.slice(0, 5), null, 2)} (showing first 5 rows of ${pr.result.rowCount} total)`).join('\n\n')}\n`
       : '';
     
+    // Build conversation history context
+    const conversationContext = conversationHistory && conversationHistory.length > 0
+      ? `\nRecent Conversation History (for context awareness):\n${conversationHistory.map((turn, i) => {
+          const turnNum = conversationHistory.length - i; // Most recent is last
+          return `Turn ${turnNum}:\n  Q: ${turn.question}\n  SQL: ${turn.sqlQueries[0] || 'N/A'}\n  Table: ${turn.resultTable || 'unknown'}\n  Columns: ${turn.resultColumns?.join(', ') || 'unknown'}\n`;
+        }).join('\n')}\n`
+      : '';
+    
     const prompt = `You are a SQL query generation assistant. Generate a PostgreSQL SELECT query to answer the user's question.
 
 Database Schema:
 ${schemaText}
 
+${metadataText ? `Table Metadata (for query optimization):
+${metadataText}` : ''}
+
 Available table names: ${tableNames}
 
 ${semanticsText}
 
-${previousContext}User Question: ${question}
+${conversationContext}${previousContext}User Question: ${question}
+
+CONTEXT AWARENESS RULES:
+${conversationHistory && conversationHistory.length > 0
+  ? `- If the question uses pronouns ("them", "it", "those") or references ("also", "and", "by country", "group by"), 
+    it likely refers to the PREVIOUS query shown in "Recent Conversation History" above
+- Use the previous query's table and columns as the base for follow-up operations
+- If asking to "group by X", modify the previous query to add "GROUP BY X"
+- If asking to "display by X" or "show by X", add "GROUP BY X" and appropriate aggregations
+- Maintain the same WHERE clauses and filters from the previous query unless explicitly changed`
+  : ''}
 
 Current Step: ${step.description}
 Reasoning: ${step.reasoning}
@@ -59,6 +81,13 @@ CRITICAL INSTRUCTIONS FOR BUSINESS SEMANTICS:
    - If an "AVOID" pattern is shown, you MUST NOT use that approach
    - Example: For "yesterday", use the provided SQL Pattern, not your own date calculation
 
+OPTIMIZATION GUIDELINES (if Table Metadata is provided):
+1. Use indexed columns for WHERE clauses when possible - check the Indexes section for each table
+2. Join smaller tables first - check estimated_row_count to determine table sizes
+3. Use primary keys for efficient lookups - see Primary key section for each table
+4. Leverage foreign key relationships for correct JOINs - see Foreign keys section
+5. Prefer UNIQUE indexes for equality checks
+
 2. DO NOT use "undefined", placeholders, or table names that are not in the schema.
 3. Look at the Database Schema section to find the correct table name and column names.
 
@@ -66,10 +95,11 @@ Generate a single PostgreSQL SELECT query that:
 1. Uses ONLY table names from the "Available table names" list (${tableNames.split(', ').slice(0, 5).join(', ')}...)
 2. Uses EXACT SQL Patterns from Business Semantics for any matching terms
 3. Only uses SELECT or WITH ... SELECT (no INSERT, UPDATE, DELETE, etc.)
-3. Is syntactically correct for PostgreSQL
-4. Answers the specific step described above
-5. Uses appropriate JOINs, WHERE clauses, and aggregations as needed
-6. Does NOT include a LIMIT clause (it will be added automatically)
+4. Is syntactically correct for PostgreSQL
+5. Answers the specific step described above
+6. Uses appropriate JOINs, WHERE clauses, and aggregations as needed
+7. Optimizes query performance using metadata (indexes, table sizes, foreign keys) when available
+8. Does NOT include a LIMIT clause (it will be added automatically)
 
 Respond with ONLY the SQL query, nothing else. No explanations, no markdown formatting, just the raw SQL.`;
 

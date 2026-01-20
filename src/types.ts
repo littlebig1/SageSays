@@ -98,6 +98,7 @@ export interface SemanticEntity {
 export interface TableSchema {
   tableName: string;
   columns: ColumnSchema[];
+  metadata?: TableMetadata; // Optional - loaded separately
 }
 
 export interface ColumnSchema {
@@ -237,4 +238,60 @@ export interface SemanticAdditionalData {
   notes?: string[];
   aggregation?: AggregationDB;
   approvedBy?: string;
+}
+
+/**
+ * Metadata about database indexes for query optimization
+ */
+export interface IndexMetadata {
+  indexName: string;
+  columns: string[];
+  isUnique: boolean;
+  indexType: string;  // btree, hash, gin, etc.
+  isPrimary: boolean;
+  definition?: string; // Full CREATE INDEX statement
+}
+
+/**
+ * Metadata about foreign key relationships
+ */
+export interface ForeignKeyMetadata {
+  constraintName: string;
+  fromColumn: string;
+  toTable: string;
+  toColumn: string;
+  onDelete?: string;  // RESTRICT, CASCADE, SET NULL, etc.
+  onUpdate?: string;
+}
+
+/**
+ * Comprehensive metadata about a table in the inspected database
+ * Stored in control database for query optimization
+ */
+export interface TableMetadata {
+  id?: string;
+  tableName: string;
+  schemaName: string;
+  estimatedRowCount: number; // From pg_stat_user_tables.n_live_tup (accurate)
+  totalSizeBytes: number; // pg_total_relation_size() = table + indexes
+  tableSizeBytes: number; // Deprecated - kept for backward compatibility (set to 0)
+  indexSizeBytes: number; // Deprecated - kept for backward compatibility (set to 0)
+  primaryKeyColumns: string[];
+  indexes: IndexMetadata[];
+  foreignKeys: ForeignKeyMetadata[];
+  lastAnalyzed: Date;
+  lastUpdated: Date;
+}
+
+/**
+ * Conversation history turn - tracks Q&A pairs for context awareness
+ * Used for follow-up question understanding
+ */
+export interface ConversationTurn {
+  question: string;
+  answer: string;
+  sqlQueries: string[];
+  resultColumns?: string[]; // Columns from last result
+  resultTable?: string;     // Main table from last query
+  timestamp: Date;
 }

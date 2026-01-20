@@ -1,9 +1,8 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { Plan, PlanStep } from '../types.js';
+import { Plan, PlanStep, ConversationTurn } from '../types.js';
 import { config } from '../config.js';
-import { formatSchemaForLLM } from '../tools/schema.js';
-import { formatSemanticsForLLM } from '../tools/semantics.js';
-import { getSemantics } from '../tools/semantics.js';
+import { formatSchemaForLLM } from '../tools/inspectedDb.js';
+import { formatSemanticsForLLM, getSemantics } from '../tools/controlDb.js';
 import { TableSchema } from '../types.js';
 import { retryWithBackoff } from '../utils/retry.js';
 
@@ -19,7 +18,8 @@ export class Planner {
   async createPlan(
     question: string,
     schema: TableSchema[],
-    previousSteps?: PlanStep[]
+    previousSteps?: PlanStep[],
+    conversationHistory?: ConversationTurn[]
   ): Promise<Plan> {
     const schemaText = formatSchemaForLLM(schema);
     const semantics = await getSemantics();
@@ -29,6 +29,14 @@ export class Planner {
       ? `Previous steps taken:\n${previousSteps.map(s => `Step ${s.stepNumber}: ${s.description}${s.sqlQuery ? `\nSQL: ${s.sqlQuery}` : ''}`).join('\n\n')}\n\n`
       : '';
     
+    // Build conversation history context
+    const conversationContext = conversationHistory && conversationHistory.length > 0
+      ? `\nRecent Conversation History (for context awareness):\n${conversationHistory.map((turn, i) => {
+          const turnNum = conversationHistory.length - i; // Most recent is last
+          return `Turn ${turnNum}:\n  Q: ${turn.question}\n  A: ${turn.answer.substring(0, 200)}${turn.answer.length > 200 ? '...' : ''}\n  Tables: ${turn.resultTable || 'unknown'}\n  Columns: ${turn.resultColumns?.join(', ') || 'unknown'}\n`;
+        }).join('\n')}\n`
+      : '';
+    
     const prompt = `You are a SQL query planning assistant. Your role is to break down user questions into a step-by-step plan for querying a PostgreSQL database.
 
 Database Schema:
@@ -36,7 +44,16 @@ ${schemaText}
 
 ${semanticsText}
 
-${context}User Question: ${question}
+${conversationContext}${context}User Question: ${question}
+
+CONTEXT AWARENESS RULES:
+${conversationHistory && conversationHistory.length > 0 
+  ? `- If the question uses pronouns ("them", "it", "those") or references ("also", "and", "by country", "group by"), 
+    it likely refers to the PREVIOUS question's results shown in "Recent Conversation History" above
+- Check the "Recent Conversation History" to understand what was just queried
+- If asking to "group by", "display by", "filter", or "show by", use the same base query from the previous turn but add the requested operation
+- The previous query's table and columns are shown above - use them as context for follow-up questions`
+  : ''}
 
 CRITICAL PLANNING RULES:
 1. Review the Business Semantics above - these provide pre-built SQL patterns for specific terms

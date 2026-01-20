@@ -12,6 +12,7 @@ The control database stores:
 - **Run logs** - Detailed history of executed queries for learning
 - **Semantic suggestions** - Learning from user corrections
 - **Context hints** - Domain-specific hints for better query generation
+- **Schema metadata** - Table sizes, indexes, foreign keys for query optimization
 
 ## Database Requirements
 
@@ -178,6 +179,74 @@ CREATE INDEX idx_run_logs_created ON run_logs(created_at DESC);
 CREATE INDEX idx_run_logs_question ON run_logs USING gin(to_tsvector('english', question));
 ```
 
+### Table: inspected_db_metadata
+
+Stores comprehensive metadata about tables in the inspected database for query optimization. This includes table sizes, indexes, primary keys, and foreign key relationships.
+
+```sql
+CREATE TABLE inspected_db_metadata (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  table_name TEXT NOT NULL,
+  schema_name TEXT DEFAULT 'public',
+  
+  -- Table statistics
+  estimated_row_count BIGINT,              -- From pg_stat_user_tables.n_live_tup (accurate)
+  total_size_bytes BIGINT,                 -- From pg_total_relation_size() (table + indexes)
+  table_size_bytes BIGINT,                 -- Deprecated: kept for backward compatibility
+  index_size_bytes BIGINT,                 -- Deprecated: kept for backward compatibility
+  
+  -- Primary key information
+  primary_key_columns TEXT[] DEFAULT '{}', -- Array of PK column names
+  
+  -- Index information (stored as JSONB for flexibility)
+  indexes JSONB DEFAULT '[]',              -- Array of index objects
+  
+  -- Foreign key information (stored as JSONB)
+  foreign_keys JSONB DEFAULT '[]',         -- Array of FK objects
+  
+  -- Metadata
+  last_analyzed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  
+  UNIQUE(table_name, schema_name)
+);
+
+CREATE INDEX idx_metadata_table ON inspected_db_metadata(table_name);
+CREATE INDEX idx_metadata_analyzed ON inspected_db_metadata(last_analyzed);
+```
+
+**Index JSONB Structure:**
+```json
+{
+  "indexName": "idx_users_email",
+  "columns": ["email"],
+  "isUnique": true,
+  "indexType": "btree",
+  "isPrimary": false,
+  "definition": "CREATE UNIQUE INDEX idx_users_email ON users(email)"
+}
+```
+
+**Foreign Key JSONB Structure:**
+```json
+{
+  "constraintName": "fk_orders_user_id",
+  "fromColumn": "user_id",
+  "toTable": "users",
+  "toColumn": "id",
+  "onDelete": "RESTRICT",
+  "onUpdate": "RESTRICT"
+}
+```
+
+**Purpose:**
+- Enables intelligent query optimization by understanding table sizes and relationships
+- Helps SQLWriter choose efficient JOIN orders (smaller tables first)
+- Guides index usage for WHERE clauses
+- Provides foreign key relationships for correct JOINs
+
+**Refresh:** Use `/refresh-metadata` command to extract and store metadata from the inspected database.
+
 ### Table: query_patterns
 
 Learns reusable query patterns for common question types.
@@ -222,6 +291,8 @@ The application code uses these tables as follows:
 - **`saveSemantic()`** - Inserts into `semantic_entities`
 - **`saveRunLog()`** - Inserts into `run_logs` with fields: `sql_generated`, `sql_executed`
 - **`getSemanticEntities()`** - Full entity retrieval with all metadata
+- **`refreshAllMetadata()`** - Extracts and stores metadata from inspected DB into `inspected_db_metadata`
+- **`getAllTableMetadata()`** - Retrieves all table metadata for query optimization
 
 ## Field Mapping
 

@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { Interpretation, SQLResult, PlanStep } from '../types.js';
 import { config } from '../config.js';
 import { retryWithBackoff } from '../utils/retry.js';
-import { formatSemanticsForLLM, getSemantics } from '../tools/semantics.js';
+import { formatSemanticsForLLM, getSemantics } from '../tools/controlDb.js';
 
 export class Interpreter {
   private genAI: GoogleGenerativeAI;
@@ -47,6 +47,16 @@ ${JSON.stringify(limitedRows, null, 2)}
 
 Completed Steps: ${completedSteps.join(', ')}
 Remaining Steps: ${allSteps.filter(s => !completedSteps.includes(s.stepNumber)).map(s => s.stepNumber).join(', ')}
+
+CRITICAL RULES:
+1. If the query returned results that directly answer the user's question, return FINAL_ANSWER
+2. LIMIT clauses are safety features - they don't invalidate an answer. If a query returns data that answers the question (even if limited), it's a FINAL_ANSWER
+3. "Show me all X" or "list all X" questions are answered by showing a representative sample (the LIMIT is intentional for safety)
+4. Only return NEEDS_REFINEMENT if:
+   - The query returned NO results and we need to try a different approach
+   - The query returned results but they're clearly wrong/irrelevant to the question
+   - We need additional data from other tables to complete the answer
+5. DO NOT return NEEDS_REFINEMENT just because there's a LIMIT clause - that's expected behavior
 
 Determine if:
 1. We have enough information to provide a FINAL_ANSWER

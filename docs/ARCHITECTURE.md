@@ -44,10 +44,11 @@ SageSays is a **Level-2 agentic system** that uses role-based orchestration to c
                    ▼
          ┌──────────────────────┐
          │    Tools Layer        │
-         │  • db.ts (SQL exec)  │
-         │  • schema.ts (cache) │
-         │  • semantics.ts      │
-         │  • logs.ts           │
+         │  • controlDb.ts      │
+         │    (learning, tracking) │
+         │  • inspectedDb.ts    │
+         │    (queries, schema) │
+         │  • pools.ts (shared) │
          └──────────────────────┘
                    │
          ┌─────────┴──────────┐
@@ -202,63 +203,69 @@ SageSays is a **Level-2 agentic system** that uses role-based orchestration to c
 
 ## Tools Layer
 
-### Database (`db.ts`)
+### Database Separation Architecture 🗂️
 
-**Functions**:
-- `getInspectedDbPool()` - Singleton connection pool
-- `runSQL(sql)` - Execute SQL with validation
-- `closeInspectedDbPool()` - Cleanup
-
-**Safety**:
-- Read-only user (recommended)
-- Statement timeout (default: 10 seconds)
-- Auto-validation via Guard
-- Row limit enforcement
+**Design**: Clear separation between two database types:
+- **Control Database**: Learning, tracking, configuration (`controlDb.ts`)
+- **Inspected Database**: Query execution, schema introspection (`inspectedDb.ts`)
+- **Shared Infrastructure**: Connection pools (`pools.ts`)
 
 ---
 
-### Schema (`schema.ts`)
+### Control Database (`controlDb.ts`) 📊
+
+**Purpose**: All operations on the control database (learning, tracking, metadata)
 
 **Functions**:
-- `loadSchemaFromDB(client)` - Load from database
-- `getSchema(client, useCache?)` - Load with caching
-- `formatSchemaForLLM(schema, tableName?)` - Format for prompts
-- `clearSchemaCache()` - Invalidate cache
-
-**Caching**:
-- In-memory cache (fastest)
-- File cache (`data/schema_cache.json`)
-- Database load (slowest, but always current)
-
-**Cache Strategy**:
-1. Check in-memory cache
-2. If miss, check file cache
-3. If miss, load from database and cache
-
----
-
-### Semantics (`semantics.ts`)
-
-**Functions**:
-- `initializeControlDB()` - Create tables if needed
-- `getSemantics(category?, term?)` - Retrieve semantics
-- `saveSemantic(semantic)` - Save new semantic
-- `getSemanticEntities(entityType?)` - Full entity retrieval
-- `formatSemanticsForLLM(semantics)` - Format for prompts
-
-**Purpose**: Store business logic, domain concepts, calculation rules
+- **Semantic Entities**: CRUD operations (`getSemantics`, `insertSemantic`, `updateSemantic`)
+- **Semantic Suggestions**: Management (`insertSuggestion`, `getPendingSuggestions`, `updateSuggestionStatus`)
+- **Run Logs**: Tracking (`insertRunLog`, `getRecentRunLogs`, `getRunLogById`)
+- **Corrections**: User feedback (`updateRunLogCorrection`)
+- **Metadata Storage**: Inspected DB metadata (`saveTableMetadata`, `getTableMetadata`, `getAllTableMetadata`)
+- **Business Logic**: Detection, formatting, orchestration (marked `@deprecated` for future extraction)
 
 **Schema**: See [`CONTROL_DB_SCHEMA.md`](./CONTROL_DB_SCHEMA.md)
 
 ---
 
-### Logs (`logs.ts`)
+### Inspected Database (`inspectedDb.ts`) 🔍
+
+**Purpose**: All operations on the inspected database (user queries, schema analysis)
 
 **Functions**:
-- `saveRunLog(question, sqlQueries, rowsReturned, durationsMs)` - Save execution log
-- `getRecentRunLogs(limit)` - Retrieve recent logs
+- **Query Execution**: Safe SQL execution (`executeQuery`, `runSQL`)
+- **Schema Loading**: Database introspection (`loadSchemaFromDB`, `getSchema`, `getSchemaWithMetadata`)
+- **Metadata Extraction**: PostgreSQL system catalogs (`extractTableMetadata`, `extractAllTableMetadata`)
+- **Caching**: Schema caching (`clearSchemaCache`)
+- **Formatting**: LLM prompt formatting (`formatSchemaForLLM`)
+- **Business Logic**: Validation, orchestration (marked `@deprecated` for future extraction)
 
-**Purpose**: Track query history for learning and optimization
+**Safety Features**:
+- Read-only user (recommended)
+- Statement timeout (default: 10 seconds)
+- Auto-validation via Guard
+- Row limit enforcement
+
+**Caching Strategy**:
+- In-memory cache (fastest)
+- File cache (`data/schema_cache.json`)
+- Database load (slowest, but always current)
+
+---
+
+### Connection Pools (`pools.ts`) 🔗
+
+**Purpose**: Centralized connection pool management for both databases
+
+**Functions**:
+- `getInspectedDbPool()` - Singleton pool for inspected database
+- `getControlDbPool()` - Singleton pool for control database
+- `closeAllPools()` - Cleanup both pools
+
+**Benefits**:
+- Single pool per database (prevents visibility issues)
+- Centralized configuration
+- Proper resource management
 
 ---
 
@@ -638,6 +645,61 @@ PostgreSQL provides this. Vector databases don't (yet).
 
 ---
 
+### 8. Schema Metadata Storage
+
+The system stores comprehensive metadata about the inspected database in the control database to enable intelligent query optimization. This metadata includes:
+
+**What's Stored:**
+- **Table sizes** - Estimated row counts, total size, table size, index size
+- **Primary keys** - Which columns are primary keys for efficient lookups
+- **Indexes** - All indexes with columns, uniqueness, type (btree, hash, gin, etc.)
+- **Foreign keys** - Relationships between tables for correct JOINs
+
+**Storage Location:**
+- Control database table: `inspected_db_metadata`
+- Stored as JSONB for indexes and foreign keys (flexible structure)
+- Refreshed via `/refresh-metadata` command or auto-refresh on startup (if stale > 7 days)
+
+**How It's Used:**
+1. **Query Optimization** - SQLWriter uses metadata to:
+   - Choose indexed columns for WHERE clauses
+   - Order JOINs by table size (smaller first)
+   - Use primary keys for efficient lookups
+   - Leverage foreign keys for correct JOIN relationships
+
+2. **LLM Prompt Enhancement** - Metadata is formatted and included in SQLWriter prompts:
+   ```
+   Table: users
+     Estimated rows: 10,000
+     Primary key: id
+     Indexes:
+       - UNIQUE idx_users_email on (email)
+       - idx_users_created_at on (created_at)
+     Foreign keys:
+       - user_id → orders.id
+   ```
+
+3. **Automatic Enrichment** - When schema is loaded via `getSchemaWithMetadata()`, metadata is automatically attached to each table if available.
+
+**Benefits:**
+- ✅ Better query performance (uses indexes)
+- ✅ Correct JOINs (uses foreign keys)
+- ✅ Efficient execution plans (smaller tables first)
+- ✅ No manual configuration needed (auto-extracted from PostgreSQL)
+
+**Implementation:**
+- **Extraction**: `src/tools/inspectedDb.ts` - Queries PostgreSQL system catalogs
+- **Storage**: Control database `inspected_db_metadata` table via `src/tools/controlDb.ts`
+- **Integration**: `getSchemaWithMetadata()` in `src/tools/inspectedDb.ts`
+- **Usage**: SQLWriter prompt includes formatted metadata
+
+**Refresh Strategy:**
+- Manual: `/refresh-metadata` command
+- Automatic: On startup if metadata is missing or older than 7 days
+- Transactional: All metadata refreshed atomically (all or nothing)
+
+---
+
 ## Safety Mechanisms
 
 ### 1. SQL Validation (Guard)
@@ -660,7 +722,34 @@ PostgreSQL provides this. Vector databases don't (yet).
 - Configurable via `MAX_ROWS` env var
 - Truncate results sent to LLM (`MAX_RESULT_ROWS_FOR_LLM`)
 
-### 4. Error Handling
+### 4. "All" Request Handling
+
+When users explicitly ask for "all" records (using keywords: `all`, `every`, `entire`, `complete`), the system uses a two-step safety approach:
+
+1. **Initial Query with LIMIT**: Runs query with LIMIT 200 first (safety check)
+2. **Detection**: If exactly 200 rows returned, detects that LIMIT was hit
+3. **User Prompt**: Asks user "Remove LIMIT to get all rows? (y/n)"
+4. **Re-execution**: If user confirms, removes LIMIT and re-executes
+5. **Warning**: Warns if result set is very large (>10,000 rows)
+
+This approach balances user intent with system safety - we don't accidentally run queries that return millions of rows, but we respect when users explicitly want all records.
+
+**Implementation**: `src/agent/orchestrator.ts` - `execute()` method
+
+**Example Flow**:
+```
+User: "show me all users"
+→ System generates: SELECT * FROM users LIMIT 200
+→ Executes → Returns 200 rows
+→ Detects: "all" keyword + LIMIT hit
+→ Prompts: "Remove LIMIT to get all rows? (y/n): "
+→ User: "y"
+→ Re-executes: SELECT * FROM users
+→ Returns 7,026 rows
+→ Shows all users
+```
+
+### 5. Error Handling
 
 - Graceful degradation (control DB optional)
 - Context-rich error messages
@@ -723,7 +812,7 @@ case '/your-command':
 ### Adding New Database
 
 1. Create adapter in `tools/` (e.g., `mysql.ts`)
-2. Implement same interface as `db.ts`
+2. Implement same interface as `inspectedDb.ts`
 3. Update config to select database type
 4. Update SQL Writer prompts for dialect
 

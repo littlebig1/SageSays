@@ -1,13 +1,11 @@
 import { Planner } from './planner.js';
 import { SQLWriter } from './sqlWriter.js';
 import { Interpreter } from './interpreter.js';
-import { PlanStep, SQLResult } from '../types.js';
-import { runSQL } from '../tools/db.js';
-import { getSchema } from '../tools/schema.js';
-import { getInspectedDbPool } from '../tools/db.js';
+import { PlanStep, SQLResult, ConversationTurn } from '../types.js';
+import { runSQL, getSchemaWithMetadata, getInspectedDbPool } from '../tools/inspectedDb.js';
 import { validateSQL } from './guard.js';
-import { saveRunLog } from '../tools/logs.js';
-import { detectSemantics } from '../tools/semantics.js';
+import { saveRunLog, detectSemantics } from '../tools/controlDb.js';
+import { config } from '../config.js';
 
 export class Orchestrator {
   private planner: Planner;
@@ -36,7 +34,9 @@ export class Orchestrator {
    * 5. Returns final answer or cancels if permission denied
    * 
    * @param question - The natural language question to answer
+   * @param conversationHistory - Optional array of previous conversation turns for context
    * @param requestPermission - Optional callback for debug mode (returns true to execute, false to cancel)
+   * @param askQuestion - Optional callback for interactive prompts
    * @returns Object containing answer, execution logs, and cancelled flag
    * 
    * @example
@@ -47,15 +47,17 @@ export class Orchestrator {
    * ```
    */
   async execute(
-    question: string, 
+    question: string,
+    conversationHistory?: ConversationTurn[],
     requestPermission?: (
       sql: string, 
       stepNumber: number, 
       totalSteps: number,
       hasSemantics: boolean,
       confidence: 'high' | 'medium' | 'low'
-    ) => Promise<boolean>
-  ): Promise<{ answer: string; logs: any; cancelled?: boolean }> {
+    ) => Promise<boolean>,
+    askQuestion?: (prompt: string) => Promise<string>
+  ): Promise<{ answer: string; logs: any; cancelled?: boolean; runLogId?: string; sqlQueries?: string[] }> {
     // Runtime assertion: ensure question is valid
     if (!question || typeof question !== 'string' || question.trim().length === 0) {
       throw new Error('Invalid question: must be a non-empty string');
@@ -71,19 +73,19 @@ export class Orchestrator {
       console.log(`🔍 Detected ${detectedSemanticIds.length} relevant semantic(s)\n`);
     }
     
-    // Load schema
+    // Load schema with metadata enrichment
     const pool = getInspectedDbPool();
     const client = await pool.connect();
     let schema;
     try {
-      schema = await getSchema(client);
+      schema = await getSchemaWithMetadata(client);
     } finally {
       client.release();
     }
     
-    // Create initial plan
+    // Create initial plan (with conversation history for context)
     console.log('📋 Creating plan...');
-    let plan = await this.planner.createPlan(question, schema);
+    let plan = await this.planner.createPlan(question, schema, undefined, conversationHistory);
     console.log(`✓ Plan created with ${plan.steps.length} step(s): ${plan.overallGoal}\n`);
     
     const executedSteps: PlanStep[] = [];
@@ -95,6 +97,7 @@ export class Orchestrator {
     let finalAnswer: string | null = null;
     let refinementCount = 0;
     const maxRefinements = 3;
+    const previousPlans: string[] = []; // Track plan signatures to detect loops
     
     // Execute plan steps
     for (let i = 0; i < plan.steps.length; i++) {
@@ -105,9 +108,9 @@ export class Orchestrator {
       console.log(`   Reasoning: ${step.reasoning}`);
       
       try {
-        // Generate SQL
+        // Generate SQL (with conversation history for context)
         console.log('   Generating SQL...');
-        let sql = await this.sqlWriter.generateSQL(step, question, schema, previousResults);
+        let sql = await this.sqlWriter.generateSQL(step, question, schema, previousResults, conversationHistory);
         
         // Validate and sanitize SQL
         const validation = validateSQL(sql);
@@ -162,6 +165,63 @@ export class Orchestrator {
         
         console.log(`   ✓ Query executed: ${result.rowCount} rows in ${duration}ms`);
         
+        // Check if user asked for "all" and we hit the LIMIT
+        const askedForAll = /\b(all|every|entire|complete)\b/i.test(question);
+        const hitLimit = result.rowCount === config.maxRows && sql.includes('LIMIT');
+        
+        if (askedForAll && hitLimit && askQuestion) {
+          // User asked for "all" but we hit the LIMIT - offer to remove it
+          console.log(`\n⚠️  Query returned exactly ${config.maxRows} rows (LIMIT reached).`);
+          console.log(`   You asked for "all" - there may be more rows.`);
+          const removeLimit = await askQuestion('   Remove LIMIT to get all rows? (y/n): ');
+          
+          if (removeLimit.trim().toLowerCase() === 'y' || removeLimit.trim().toLowerCase() === 'yes') {
+            // Remove LIMIT and re-execute
+            const sqlWithoutLimit = sql.replace(/\s+LIMIT\s+\d+/i, '');
+            console.log('   Re-executing without LIMIT...');
+            
+            const startTime2 = Date.now();
+            const result2 = await runSQL(sqlWithoutLimit);
+            const duration2 = Date.now() - startTime2;
+            
+            console.log(`   ✓ Query executed: ${result2.rowCount} rows in ${duration2}ms`);
+            
+            // Warn if too many rows
+            if (result2.rowCount > 10000) {
+              console.log(`\n⚠️  Warning: Query returned ${result2.rowCount} rows. This is a large result set.`);
+            }
+            
+            // Update with the full result
+            sqlQueries[sqlQueries.length - 1] = sqlWithoutLimit; // Replace last query
+            rowsReturned[rowsReturned.length - 1] = result2.rowCount; // Replace last count
+            durationsMs[durationsMs.length - 1] = duration2; // Replace last duration
+            
+            // Store the full result
+            previousResults.push({ step: stepNumber, result: result2 });
+            executedSteps.push(step);
+            
+            // Continue with interpretation using full result
+            console.log('   Interpreting results...');
+            const interpretation = await this.interpreter.interpret(
+              question,
+              step,
+              result2,
+              plan.steps,
+              executedSteps.map(s => s.stepNumber)
+            );
+            
+            console.log(`   Interpretation: ${interpretation.status} (confidence: ${interpretation.confidence})`);
+            
+            if (interpretation.status === 'FINAL_ANSWER') {
+              finalAnswer = interpretation.answer || 'Answer generated from query results.';
+              break;
+            }
+            
+            // Skip the rest of the loop iteration since we already interpreted
+            continue;
+          }
+        }
+        
         // Store result
         previousResults.push({ step: stepNumber, result });
         executedSteps.push(step);
@@ -184,6 +244,19 @@ export class Orchestrator {
         } else if (interpretation.status === 'NEEDS_REFINEMENT') {
           // Check if we should create a refined plan
           if (refinementCount < maxRefinements && i === plan.steps.length - 1) {
+            // Create plan signature to detect loops
+            const planSignature = plan.steps.map(s => s.description).join('|');
+            
+            // Check if we've seen this plan before (loop detection)
+            if (previousPlans.includes(planSignature)) {
+              console.log(`\n⚠️  Detected refinement loop - same plan generated again.`);
+              console.log(`   Treating current results as final answer.\n`);
+              // Break out and use current results as final answer
+              break;
+            }
+            
+            previousPlans.push(planSignature);
+            
             console.log(`\n🔄 Creating refined plan based on results...`);
             refinementCount++;
             plan = await this.planner.createPlan(question, schema, executedSteps);
@@ -231,6 +304,8 @@ export class Orchestrator {
         runLogId, // Include run_log_id for corrections
       },
       cancelled: false,
+      runLogId: runLogId,
+      sqlQueries: sqlQueries, // Return SQL queries for conversation history
     };
   }
 }

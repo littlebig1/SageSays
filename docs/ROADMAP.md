@@ -1,9 +1,8 @@
 # SageSays Roadmap
 
-> **Last Updated**: 2026-01-19  
-> **Current Version**: v1.2.0  
-> **Next Target**: v1.3.0 - Learning from User Corrections  
-> **Parallel Track**: Phase 7.1 - Testing Quick Wins (optional, recommended before Phase 4)
+> **Last Updated**: 2026-01-20  
+> **Current Version**: v1.3.5  
+> **Next Target**: Phase 3 (remaining tasks) or Phase 4 - Complex Logic Handling
 
 ---
 
@@ -13,9 +12,9 @@ Transform SageSays from a basic SQL agent into an intelligent system that **lear
 
 ---
 
-## 📍 Current Status
+## ✅ Completed Phases
 
-### ✅ Phase 1: Control Database Foundation (v1.1.0) - **COMPLETED**
+### Phase 1: Control Database Foundation (v1.1.0) - **COMPLETED**
 
 **Goal**: Establish solid control database foundation
 
@@ -34,7 +33,7 @@ Transform SageSays from a basic SQL agent into an intelligent system that **lear
 
 ---
 
-## ✅ Phase 2: Basic Semantic Integration (v1.2.0) - **COMPLETED**
+### Phase 2: Basic Semantic Integration (v1.2.0) - **COMPLETED**
 
 **Goal**: Make the system use existing semantics to improve query generation
 
@@ -105,7 +104,171 @@ npx tsx scripts/test-semantic-detection.ts
 
 ---
 
-## 📋 Phase 3: Learning from User Corrections (v1.3.0)
+### Phase 3.3: Pre-Execution Corrections (v1.3.0) - **COMPLETED**
+
+**Goal**: Capture user corrections before SQL execution and learn from manual SQL edits
+
+**Completed Tasks**:
+- [x] Create `/review-suggestions` CLI command
+  - [x] List pending suggestions
+  - [x] Show evidence (original question, SQL, correction)
+  - [x] Prompt: Approve / Reject / Modify
+
+- [x] Approval actions:
+  - [x] Approve → Create new semantic_entity
+  - [x] Reject → Mark suggestion as rejected
+  - [x] Modify → Edit suggestion, then approve
+
+- [x] Update semantic_suggestions:
+  - [x] Set `reviewed_by` (username or email)
+  - [x] Set `reviewed_at` timestamp
+  - [x] Set `status` ('approved' / 'rejected')
+
+- [x] Pre-execution correction capture:
+  - [x] Detect when user rejects SQL in debug mode
+  - [x] Offer three options: provide feedback, edit SQL manually, or cancel
+  - [x] Capture text-based feedback for pre-execution corrections
+  - [x] Implement manual SQL edit with diff learning
+  - [x] Re-execute original question after approval to validate learned semantic
+
+- [x] "All" request handling:
+  - [x] Detect "all" keywords in questions (all, every, entire, complete)
+  - [x] Run query with LIMIT first (safety check)
+  - [x] If exactly 200 rows returned, prompt user to remove LIMIT
+  - [x] Re-execute without LIMIT if user confirms
+  - [x] Warn if result set is very large (>10,000 rows)
+
+- [x] Bug fixes:
+  - [x] Fixed infinite refinement loop (Interpreter incorrectly treating LIMIT as invalid)
+  - [x] Added loop detection to prevent same plan regeneration
+  - [x] Updated Interpreter prompt to recognize LIMIT as safety feature
+
+**Success Criteria**:
+- ✅ System detects corrections (both pre and post-execution)
+- ✅ Extracts semantic patterns automatically
+- ✅ Human can review and approve
+- ✅ Approved suggestions become semantics
+- ✅ Pre-execution corrections work with manual SQL edit
+- ✅ "All" requests properly handled with LIMIT removal option
+
+**Outcome**: ✅ **Phase 3.3 complete - full correction learning workflow implemented!**
+
+---
+
+### Phase 4.5: Enhanced Schema Metadata Storage (v1.3.5) - **COMPLETED**
+
+**Goal**: Store comprehensive metadata about the inspected database (indexes, table sizes, foreign keys, primary keys) to enable intelligent query optimization.
+
+**Completed Tasks**:
+- [x] Created `inspected_db_metadata` table in control database
+- [x] Implemented extraction functions for:
+  - [x] Table sizes (estimated row count from `pg_stat_user_tables`, total size)
+  - [x] Primary keys (which columns are PKs)
+  - [x] Indexes (all indexes with columns, uniqueness, type)
+  - [x] Foreign keys (relationships between tables using `pg_constraint`)
+- [x] Created `src/tools/metadata.ts` with all extraction and storage functions
+- [x] Implemented `saveTableMetadata()`, `getTableMetadata()`, `getAllTableMetadata()`, `refreshAllMetadata()`
+- [x] Created `getSchemaWithMetadata()` function in `schema.ts`
+- [x] Updated `orchestrator.ts` to use `getSchemaWithMetadata()` instead of `getSchema()`
+- [x] Created `formatMetadataForLLM()` function to format metadata for prompts
+- [x] Updated SQLWriter prompt to include metadata and optimization guidelines
+- [x] Added `/refresh-metadata` command to refresh metadata from inspected DB
+- [x] Added auto-refresh on startup if metadata is missing or stale (>7 days)
+- [x] Updated all documentation (CONTROL_DB_SCHEMA.md, ARCHITECTURE.md, ROADMAP.md, README.md)
+
+**Success Criteria - ALL MET**:
+- ✅ Metadata table created and initialized
+- ✅ Functions extract indexes, sizes, FKs, PKs from PostgreSQL
+- ✅ Metadata stored and retrievable from control DB
+- ✅ SQLWriter uses metadata for query optimization
+- ✅ `/refresh-metadata` command works
+- ✅ Metadata automatically enriches schema when available
+- ✅ Documentation updated
+
+**Outcome**: ✅ **Phase 4.5 complete - metadata system fully operational!**
+
+---
+
+### Phase 6.6: Tool Consolidation & Database Separation (v1.3.6) - **COMPLETED**
+
+**Goal**: Organize database tools into clear separation between control DB and inspected DB operations
+
+**Completed Tasks**:
+- [x] **Option 3 Implementation**: Single files per database type
+  - [x] Created `src/tools/controlDb.ts` - All control database operations (1174 lines)
+  - [x] Created `src/tools/inspectedDb.ts` - All inspected database operations (531 lines)
+  - [x] Maintained `src/tools/pools.ts` - Shared connection pool management
+
+- [x] **Control DB Consolidation**: All learning and tracking operations
+  - [x] Semantic entities CRUD operations
+  - [x] Semantic suggestions management
+  - [x] Run logs and correction tracking
+  - [x] Inspected DB metadata storage
+  - [x] Business logic functions (marked `@deprecated` for future extraction)
+
+- [x] **Inspected DB Consolidation**: All query and schema operations
+  - [x] SQL query execution with safety validations
+  - [x] Schema loading and caching
+  - [x] Metadata extraction (indexes, foreign keys, table sizes, primary keys)
+  - [x] Business logic functions (marked `@deprecated` for future extraction)
+
+- [x] **Import Updates**: Updated all files across codebase
+  - [x] `src/index.ts` - Main CLI entry point
+  - [x] `src/agent/orchestrator.ts` - Agent coordination
+  - [x] `src/agent/planner.ts` - Plan generation
+  - [x] `src/agent/sqlWriter.ts` - SQL generation
+  - [x] `src/agent/interpreter.ts` - Result interpretation
+  - [x] `src/agent/semanticLearner.ts` - Learning logic
+
+- [x] **Backward Compatibility**: Maintained existing API
+  - [x] Added alias functions: `saveRunLog`, `saveCorrection`, `saveSuggestion`, `rejectSuggestion`
+  - [x] Existing code continues to work without changes
+  - [x] Smooth transition path for future refactoring
+
+- [x] **File Cleanup**: Removed redundant tool files
+  - [x] Deleted `src/tools/semantics.ts`
+  - [x] Deleted `src/tools/suggestions.ts`
+  - [x] Deleted `src/tools/logs.ts`
+  - [x] Deleted `src/tools/corrections.ts`
+  - [x] Deleted `src/tools/metadata.ts`
+  - [x] Deleted `src/tools/db.ts`
+  - [x] Deleted `src/tools/schema.ts`
+
+**Success Criteria**:
+- ✅ Clear separation between control DB and inspected DB operations
+- ✅ All imports updated and code compiles successfully
+- ✅ Backward compatibility maintained
+- ✅ Reduced complexity - single source of truth per database type
+
+**Architecture Benefits**:
+1. **Clear Database Separation**: Easy to see which DB each operation targets
+2. **Reduced Cognitive Load**: Fewer files to understand and maintain
+3. **Future Refactoring Path**: Business logic marked for `src/services/` extraction
+4. **Presentation Logic Path**: Formatting functions marked for `src/formatters/` extraction
+
+**Outcome**: ✅ **Phase 6.6 complete - clean database tool separation achieved!**
+
+---
+
+## 📍 Current Status
+
+> **Last Updated**: 2026-01-20
+> **Current Version**: v1.3.6
+> **Next Target**: Phase 3 (remaining tasks) or Phase 4 - Complex Logic Handling
+
+**Recent Changes**:
+- ✅ **Phase 6.6 Completed**: Tool consolidation with clear database separation
+  - Control DB operations → `src/tools/controlDb.ts`
+  - Inspected DB operations → `src/tools/inspectedDb.ts`
+  - All imports updated, backward compatibility maintained
+
+---
+
+## 📋 Upcoming Phases
+
+### Phase 3: Learning from User Corrections (v1.3.0) - **IN PROGRESS**
+
+> **Note**: Phase 3.3 (Pre-Execution Corrections) is already completed. See "Completed Phases" section above.
 
 **Goal**: Automatically learn new semantics from user corrections
 
@@ -159,46 +322,11 @@ npx tsx scripts/test-semantic-detection.ts
   - [ ] Confidence score based on evidence strength
   - [ ] Link to source run_log_id
 
-### 3.3 Approval Workflow
-
-**Tasks**:
-- [ ] Create `/review-suggestions` CLI command
-  - [ ] List pending suggestions
-  - [ ] Show evidence (original question, SQL, correction)
-  - [ ] Prompt: Approve / Reject / Modify
-
-- [ ] Approval actions:
-  - [ ] Approve → Create new semantic_entity
-  - [ ] Reject → Mark suggestion as rejected
-  - [ ] Modify → Edit suggestion, then approve
-
-- [ ] Update semantic_suggestions:
-  - [ ] Set `reviewed_by` (username or email)
-  - [ ] Set `reviewed_at` timestamp
-  - [ ] Set `status` ('approved' / 'rejected')
-
-  📋 Phase 3.3 Checklist (Future Reference)
-When implementing Phase 3.3, address:
-[ ] Don't reset context on query rejection
-[ ] Create run_log entry for rejected queries
-[ ] Add execution_status column to run_logs
-[ ] Modify correction capture to handle missing execution data
-[ ] Update correction prompt after rejection
-[ ] Add /edit option to debug mode prompt
-[ ] Test pre-execution correction flow
-[ ] Update documentation
-[ ] Update test plan
-
-
-**Success Criteria**:
-- ✅ System detects corrections
-- ✅ Extracts semantic patterns automatically
-- ✅ Human can review and approve
-- ✅ Approved suggestions become semantics
+> **Note**: Phase 3.3 (Pre-Execution Corrections) has been completed. See "Completed Phases" section above for details.
 
 ---
 
-## 📋 Phase 4: Complex Logic Handling (v1.4.0)
+### Phase 4: Complex Logic Handling (v1.4.0)
 
 **Goal**: Handle sophisticated business rules like the order_item_states example
 
@@ -262,7 +390,7 @@ When implementing Phase 3.3, address:
 
 ---
 
-## 📋 Phase 5: Enhanced Semantic Discovery (v1.5.0)
+### Phase 5: Enhanced Semantic Discovery (v1.5.0)
 
 **Goal**: Improve semantic detection and add advanced retrieval capabilities
 
@@ -348,7 +476,7 @@ After (vector search):
 
 ---
 
-## 📋 Phase 6: Advanced Features (v2.0.0)
+### Phase 6: Advanced Features (v2.0.0)
 
 ### 6.1 Confidence Scoring
 
@@ -380,6 +508,91 @@ After (vector search):
 
 ---
 
+### Phase 6.5: UX Enhancements - Conversation Context (v1.6.0)
+
+**Goal**: Improve user experience by maintaining conversation context for follow-up questions
+
+**Problem**: Users ask follow-up questions like "display them by country" but the system loses context of previous queries.
+
+### 6.5.1 Conversation History Window ✅ **COMPLETED**
+
+**Completed Tasks**:
+- [x] Added `ConversationTurn` interface to track Q&A pairs
+- [x] Implemented conversation history tracking in `index.ts` (sliding window of last 3 turns)
+- [x] Updated `orchestrator.execute()` to accept `conversationHistory` parameter
+- [x] Updated `planner.createPlan()` to include conversation history in prompts
+- [x] Updated `sqlWriter.generateSQL()` to include conversation history in prompts
+- [x] Added helper functions to extract table/column info from SQL
+- [x] Context awareness rules in LLM prompts for follow-up question understanding
+
+**How It Works**:
+- System maintains last 3 conversation turns (question, answer, SQL, table, columns)
+- History is passed to Planner and SQLWriter
+- LLM prompts include "Recent Conversation History" section
+- Context awareness rules help LLM understand pronouns ("them", "it") and references ("by country")
+
+**Testing**:
+```bash
+> all the shops under Vinamilk
+[Shows shops]
+
+> display them by country
+[Should understand "them" = shops, add GROUP BY country]
+```
+
+### 6.5.2 Follow-up Detection & Auto-Context Injection (TODO)
+
+**Tasks**:
+- [ ] Add `isFollowUpQuestion()` function to detect follow-up keywords
+  - [ ] Keywords: "them", "it", "those", "also", "and", "by", "group by", "display by", "filter", "more"
+  - [ ] Pattern matching for common follow-up phrases
+- [ ] Auto-enhance questions with previous context
+  - [ ] Detect follow-up → inject previous question context
+  - [ ] Show user: "💭 Detected follow-up. Context: Previous query about X"
+  - [ ] Build enhanced question: "Previous: X. Now: Y"
+- [ ] Test with various follow-up patterns
+
+**Estimated Effort**: 2-3 hours
+
+### 6.5.3 Explicit Refinement Commands (TODO)
+
+**Tasks**:
+- [ ] Add `/refine <operation>` command
+  - [ ] `/refine group by country`
+  - [ ] `/refine filter where status = 'active'`
+  - [ ] `/refine order by name`
+- [ ] Add `/filter <condition>` command
+- [ ] Add `/group <columns>` command
+- [ ] Re-execute previous query with refinement
+- [ ] Show diff: "Previous: X → New: Y"
+
+**Estimated Effort**: 2-3 hours
+
+### 6.5.4 Hybrid Approach with Context Hints (TODO)
+
+**Tasks**:
+- [ ] Combine all three approaches (history + detection + commands)
+- [ ] Show context hints to user when follow-up detected
+  - [ ] "💭 I see you're asking a follow-up. Previous query was about shops."
+  - [ ] "Interpreting 'display them by country' as: GROUP BY country on shops table"
+- [ ] Allow user to confirm/correct context interpretation
+- [ ] Improve context extraction accuracy
+  - [ ] Better SQL parsing for table/column extraction
+  - [ ] Use actual query results (not just SQL) for column names
+  - [ ] Store result schema in conversation history
+
+**Estimated Effort**: 3-4 hours
+
+**Success Criteria**:
+- ✅ Follow-up questions understood correctly 90%+ of the time
+- ✅ User can reference previous results naturally
+- ✅ System maintains context across multiple turns
+- ✅ Clear feedback when context is used
+
+**Total Estimated Effort**: 7-10 hours (incremental implementation)
+
+---
+
 ## 🐛 Known Issues
 
 **Current**:
@@ -392,7 +605,7 @@ After (vector search):
 
 ---
 
-## 📋 Phase 8: Performance & Query Optimization (v2.1.0)
+### Phase 8: Performance & Query Optimization (v2.1.0)
 
 **Goal**: Intelligently handle query timeouts and optimize slow queries
 
@@ -592,7 +805,7 @@ After (vector search):
 
 ---
 
-## 📋 Phase 7: Testing Infrastructure (v1.x.x - Ongoing)
+### Phase 7: Testing Infrastructure (v1.x.x - Ongoing)
 
 **Goal**: Improve test coverage and refactor architecture for better testability
 
@@ -975,6 +1188,11 @@ Common Mistakes: ${JSON.stringify(semantic.anti_patterns)}
 ### Phase 4 Success:
 - [ ] Complex logic rules working correctly
 - [ ] Anti-pattern detection rate > 90%
+
+### Phase 4.5 Success:
+- [x] Metadata table created and populated
+- [x] SQLWriter uses metadata for optimization
+- [x] `/refresh-metadata` command functional
 
 ### Phase 8 Success:
 - [ ] 90%+ of timed-out queries successfully optimized

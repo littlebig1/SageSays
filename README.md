@@ -329,6 +329,7 @@ Or:
   - `off` - Execute all queries automatically  
   - `smart` - Review only queries without semantics OR confidence < 95%
 - `/refresh-schema` - Refresh the database schema cache
+- `/refresh-metadata` - Refresh table metadata (indexes, sizes, foreign keys) from inspected DB
 - `/show-schema [table]` - Show database schema (optionally filtered by table name)
 - `/show-semantics` - Show business semantics definitions
 - `/help` - Show help message
@@ -400,6 +401,20 @@ If your database schema changes, run:
 ```
 
 Or restart the CLI - it will automatically load the schema on startup.
+
+### 8. Refresh Table Metadata
+
+The system stores metadata about your database tables (indexes, sizes, foreign keys) to optimize queries. To refresh this metadata:
+
+```
+> /refresh-metadata
+```
+
+Metadata is automatically refreshed on startup if it's missing or older than 7 days. This metadata helps the SQLWriter:
+- Use indexed columns for efficient WHERE clauses
+- Join smaller tables first
+- Use primary keys for lookups
+- Leverage foreign keys for correct JOINs
 
 ---
 

@@ -1,12 +1,23 @@
 import readline from 'readline';
 import { Orchestrator } from './agent/orchestrator.js';
-import { getSchema, formatSchemaForLLM, clearSchemaCache } from './tools/schema.js';
-import { getInspectedDbPool, closeInspectedDbPool } from './tools/db.js';
-import { initializeControlDB, getSemantics, formatSemanticsForLLM } from './tools/semantics.js';
+import { getSchema, formatSchemaForLLM, clearSchemaCache, getInspectedDbPool } from './tools/inspectedDb.js';
+import { closeAllPools } from './tools/pools.js';
+import { 
+  initializeControlDB, 
+  getSemantics, 
+  formatSemanticsForLLM,
+  refreshAllMetadata,
+  initializeMetadataTable,
+  getAllTableMetadata,
+  saveCorrection,
+  getRunLogById,
+  saveSuggestion,
+  approveSuggestion,
+  rejectSuggestion,
+  getPendingSuggestions
+} from './tools/controlDb.js';
 import { config } from './config.js';
-import { DebugMode, confidenceToPercentage, meetsConfidenceThreshold, CorrectionCapture, SemanticSuggestion } from './types.js';
-import { saveCorrection, getRunLogById } from './tools/corrections.js';
-import { saveSuggestion, approveSuggestion, rejectSuggestion, getPendingSuggestions } from './tools/suggestions.js';
+import { DebugMode, confidenceToPercentage, meetsConfidenceThreshold, CorrectionCapture, SemanticSuggestion, ConversationTurn } from './types.js';
 import { SemanticLearner } from './agent/semanticLearner.js';
 
 const rl = readline.createInterface({
@@ -22,10 +33,95 @@ let lastQuestion: string = '';
 let lastRunLogId: string | undefined;
 let lastSqlQueries: string[] = [];
 
+// Conversation history tracking (Option 1: Conversation History Window)
+const MAX_CONVERSATION_HISTORY = 3; // Keep last 3 turns
+let conversationHistory: ConversationTurn[] = [];
+
+// Global orchestrator for re-execution support (Phase 3.3)
+let globalOrchestrator: Orchestrator | null = null;
+
 function question(prompt: string): Promise<string> {
   return new Promise((resolve) => {
     rl.question(prompt, resolve);
   });
+}
+
+/**
+ * Extract main table name from SQL query
+ * Simple heuristic: looks for FROM/JOIN clauses
+ */
+function extractTableFromSQL(sql: string): string | undefined {
+  if (!sql) return undefined;
+  
+  // Try to find FROM clause
+  const fromMatch = sql.match(/\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)/i);
+  if (fromMatch) {
+    return fromMatch[1];
+  }
+  
+  // Try to find JOIN clause
+  const joinMatch = sql.match(/\bJOIN\s+([a-zA-Z_][a-zA-Z0-9_]*)/i);
+  if (joinMatch) {
+    return joinMatch[1];
+  }
+  
+  return undefined;
+}
+
+/**
+ * Extract column names from SQL SELECT clause
+ * Simple heuristic: looks for SELECT ... FROM pattern
+ */
+function extractColumnsFromSQL(sql: string): string[] {
+  if (!sql) return [];
+  
+  const selectMatch = sql.match(/\bSELECT\s+(.+?)\s+FROM/i);
+  if (!selectMatch) return [];
+  
+  const selectClause = selectMatch[1];
+  
+  // Handle SELECT * case
+  if (selectClause.trim() === '*') {
+    return []; // Can't determine columns from *
+  }
+  
+  // Split by comma and extract column names (simple approach)
+  const columns = selectClause
+    .split(',')
+    .map(col => {
+      // Remove AS aliases
+      const aliasMatch = col.match(/\bAS\s+([a-zA-Z_][a-zA-Z0-9_]*)/i);
+      if (aliasMatch) {
+        return aliasMatch[1].trim();
+      }
+      // Extract column name (handle table.column format)
+      const colMatch = col.match(/(?:[a-zA-Z_][a-zA-Z0-9_]*\.)?([a-zA-Z_][a-zA-Z0-9_]*)/);
+      return colMatch ? colMatch[1].trim() : col.trim();
+    })
+    .filter(col => col && !col.match(/^(COUNT|SUM|AVG|MIN|MAX|DISTINCT)$/i));
+  
+  return columns;
+}
+
+/**
+ * Extract column names from answer text (if it contains structured data)
+ * This is a fallback - ideally we'd get this from the SQL result
+ */
+function extractColumnsFromAnswer(answer: string): string[] {
+  // Try to parse JSON if present
+  try {
+    const jsonMatch = answer.match(/\[[\s\S]*\]/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'object') {
+        return Object.keys(parsed[0]);
+      }
+    }
+  } catch {
+    // Not JSON, continue
+  }
+  
+  return [];
 }
 
 async function handleCommand(cmd: string, args: string[]): Promise<boolean> {
@@ -77,6 +173,28 @@ async function handleCommand(cmd: string, args: string[]): Promise<boolean> {
       return false;
     }
     
+    case '/refresh-metadata': {
+      if (!config.controlDbUrl) {
+        console.log('\n⚠️  Control database not configured. Set CONTROL_DB_URL to use metadata.\n');
+        return false;
+      }
+      
+      try {
+        const pool = getInspectedDbPool();
+        const client = await pool.connect();
+        try {
+          await refreshAllMetadata(client);
+          console.log('\n✅ Metadata refreshed successfully!\n');
+        } finally {
+          client.release();
+        }
+      } catch (error) {
+        console.error('\n❌ Error refreshing metadata:', error);
+      }
+      
+      return false;
+    }
+    
     case '/show-schema': {
       const tableName = args[0];
       const pool = getInspectedDbPool();
@@ -102,6 +220,17 @@ async function handleCommand(cmd: string, args: string[]): Promise<boolean> {
       return false;
     }
     
+    case '/refresh-semantics': {
+      if (!config.controlDbUrl) {
+        console.log('\n⚠️  Control database not configured. Set CONTROL_DB_URL to use semantics.\n');
+        return false;
+      }
+      // Force a fresh query by calling getSemantics (no cache, but ensures fresh connection)
+      const semantics = await getSemantics();
+      console.log(`\n✅ Semantics refreshed. Found ${semantics.length} semantic(s).\n`);
+      return false;
+    }
+    
     case '/review-suggestions': {
       if (!config.controlDbUrl) {
         console.log('\n⚠️  Control database not configured. Set CONTROL_DB_URL to use suggestions.\n');
@@ -123,11 +252,19 @@ Available commands:
       off   - Execute all queries automatically
       smart - Review only queries without semantics OR confidence < ${config.debugModeConfidenceThreshold}%
   /refresh-schema          - Refresh the database schema cache
+  /refresh-metadata        - Refresh table metadata (indexes, sizes, FKs) from inspected DB
+  /refresh-semantics       - Refresh semantics from control database (force fresh query)
   /show-schema [table]     - Show database schema (optionally filtered by table)
   /show-semantics          - Show business semantics definitions
   /review-suggestions      - Review pending semantic suggestions for approval
   /help                    - Show this help message
   /exit, /quit            - Exit the CLI
+
+Debug Mode Options:
+  When SQL is shown during debug mode, you can:
+    - Type "y" to execute the query
+    - Type "n" to reject and provide text feedback (I'll learn from it)
+    - Type "edit" to manually correct the SQL (I'll learn from the diff and re-run)
 
 Semantic Learning:
   - Say "that's wrong" after a query to trigger correction capture
@@ -240,8 +377,9 @@ async function capturePostExecutionCorrection(
 /**
  * Show immediate approval prompt for a semantic suggestion.
  * This is the Option B workflow: immediate approval during the session.
+ * Returns true if approved, false otherwise.
  */
-async function showImmediateApprovalPrompt(suggestion: SemanticSuggestion): Promise<void> {
+async function showImmediateApprovalPrompt(suggestion: SemanticSuggestion): Promise<boolean> {
   console.log('\n💡 I learned a pattern from your correction:\n');
   console.log('═'.repeat(60));
   console.log(`Semantic: ${suggestion.suggested_name}`);
@@ -286,17 +424,22 @@ async function showImmediateApprovalPrompt(suggestion: SemanticSuggestion): Prom
     try {
       await approveSuggestion(suggestion, 'user');
       console.log('\n✅ Semantic saved! I\'ll use this knowledge from now on.\n');
+      return true;
     } catch (error) {
       console.error('\n❌ Error approving suggestion:', error);
+      return false;
     }
   } else if (choice === 'later' || choice === 'l') {
     console.log('\n📝 Saved for later review. Use /review-suggestions to review.\n');
+    return false;
   } else {
     try {
       await rejectSuggestion(suggestion.id, 'user', 'User rejected during immediate review');
       console.log('\n❌ Suggestion rejected.\n');
+      return false;
     } catch (error) {
       console.error('\n❌ Error rejecting suggestion:', error);
+      return false;
     }
   }
 }
@@ -335,6 +478,149 @@ async function reviewPendingSuggestions(): Promise<void> {
   console.log('\n✅ All suggestions reviewed!\n');
 }
 
+/**
+ * Capture user feedback when they reject a query before execution.
+ * This is a pre-execution correction - no run_log exists yet.
+ * Phase 3.3: Pre-execution corrections
+ */
+async function capturePreExecutionFeedback(
+  originalQuestion: string,
+  generatedSql: string
+): Promise<void> {
+  console.log('\n💭 What was wrong with the generated SQL?');
+  const feedback = await question('Your feedback: ');
+  
+  if (!feedback.trim()) {
+    console.log('⚠️  No feedback provided.\n');
+    return;
+  }
+  
+  // Build correction object (no run_log_id for pre-execution)
+  const correction: CorrectionCapture = {
+    correction_stage: 'pre_execution',
+    original_question: originalQuestion,
+    original_sql: generatedSql,
+    user_feedback: feedback.trim(),
+    correction_type: 'wrong_sql', // Pre-execution is always about SQL
+    // No run_log_id - query wasn't executed
+  };
+  
+  // Same learning flow as post-execution
+  console.log('\n🧠 Analyzing your feedback...');
+  
+  try {
+    const learner = new SemanticLearner();
+    const pool = getInspectedDbPool();
+    const client = await pool.connect();
+    let schema;
+    try {
+      schema = await getSchema(client);
+    } finally {
+      client.release();
+    }
+    
+    const suggestionData = await learner.analyzeCorrection(null, correction, schema);
+    
+    if (!suggestionData) {
+      console.log('⚠️  Could not generate semantic suggestion from this feedback.\n');
+      return;
+    }
+    
+    const suggestion = await saveSuggestion(suggestionData);
+    
+    if (!suggestion) {
+      console.log('⚠️  Could not save suggestion (control DB may not be configured).\n');
+      return;
+    }
+    
+    // Show immediate approval prompt (reuse existing function)
+    await showImmediateApprovalPrompt(suggestion);
+    
+  } catch (error) {
+    console.error('\n❌ Error during learning:', error);
+  }
+}
+
+/**
+ * Handle manual SQL editing with learning from diff.
+ * User edits SQL → System learns from changes → Asks for approval → Re-runs with new knowledge.
+ * Phase 3.3: Pre-execution corrections with manual SQL edit
+ */
+async function handleManualSqlEdit(
+  originalQuestion: string,
+  generatedSql: string,
+  _stepNumber: number,
+  _totalSteps: number
+): Promise<void> {
+  console.log('\n✏️  Edit the SQL below (press Enter when done):');
+  console.log('Original SQL:');
+  console.log(generatedSql);
+  console.log('\nEnter your corrected SQL:');
+  
+  const editedSql = await question('> ');
+  
+  if (!editedSql.trim() || editedSql.trim() === generatedSql.trim()) {
+    console.log('⚠️  No changes made.\n');
+    return;
+  }
+  
+  console.log('\n🧠 Analyzing the SQL changes to learn what was wrong...');
+  
+  try {
+    const learner = new SemanticLearner();
+    const pool = getInspectedDbPool();
+    const client = await pool.connect();
+    let schema;
+    try {
+      schema = await getSchema(client);
+    } finally {
+      client.release();
+    }
+    
+    // Use new method to analyze SQL diff
+    const suggestionData = await learner.analyzeSqlDiff(
+      originalQuestion,
+      generatedSql,
+      editedSql.trim(),
+      schema
+    );
+    
+    if (!suggestionData) {
+      console.log('⚠️  Could not learn from SQL changes.\n');
+      console.log('💡 Tip: Provide more context about what was wrong.\n');
+      return;
+    }
+    
+    const suggestion = await saveSuggestion(suggestionData);
+    
+    if (!suggestion) {
+      console.log('⚠️  Could not save suggestion (control DB may not be configured).\n');
+      return;
+    }
+    
+    // Show approval prompt and track if approved
+    const wasApproved = await showImmediateApprovalPrompt(suggestion);
+    
+    if (wasApproved && globalOrchestrator) {
+      console.log('\n🔄 Re-running your original question with the new knowledge...\n');
+      
+      try {
+        // Execute without permission callback to auto-run (pass empty history for re-execution)
+        const result = await globalOrchestrator.execute(originalQuestion, [], undefined, question);
+        
+        console.log(`\n💡 Answer (with learned semantic):\n${result.answer}\n`);
+        console.log(`📊 Summary: ${result.logs.steps} steps, ${result.logs.queries} queries\n`);
+        console.log('✅ Verify that this answer is now correct!\n');
+      } catch (error) {
+        console.error('❌ Error re-running question:', error);
+      }
+    }
+    
+  } catch (error) {
+    console.error('\n❌ Error during SQL diff learning:', error);
+  }
+}
+
 async function main() {
   console.log('🚀 SQL Agent CLI - Level 2 Orchestration');
   console.log('==========================================\n');
@@ -344,7 +630,39 @@ async function main() {
     console.log('🔧 Initializing control database...');
     await initializeControlDB();
     if (config.controlDbUrl) {
-      console.log('✓ Control database initialized\n');
+      console.log('✓ Control database initialized');
+      
+      // Initialize metadata table
+      try {
+        await initializeMetadataTable();
+      } catch (error) {
+        console.warn('⚠️  Metadata table initialization failed:', error);
+      }
+      
+      // Check if metadata needs refresh (older than 7 days)
+      try {
+        const metadata = await getAllTableMetadata();
+        const needsRefresh = metadata.length === 0 || 
+          metadata.some(m => {
+            const daysSinceUpdate = (Date.now() - m.lastUpdated.getTime()) / (1000 * 60 * 60 * 24);
+            return daysSinceUpdate > 7;
+          });
+        
+        if (needsRefresh) {
+          console.log('📊 Metadata appears stale, refreshing...');
+          const pool = getInspectedDbPool();
+          const client = await pool.connect();
+          try {
+            await refreshAllMetadata(client);
+          } finally {
+            client.release();
+          }
+        }
+      } catch (error) {
+        // Silently ignore - metadata refresh is optional
+      }
+      
+      console.log('');
     } else {
       console.log('⚠️  Control database not configured (optional)\n');
     }
@@ -371,6 +689,7 @@ async function main() {
   }
   
   const orchestrator = new Orchestrator();
+  globalOrchestrator = orchestrator; // Make globally accessible for re-execution (Phase 3.3)
   
   console.log(`🧠 Debug mode: ${debugMode.toUpperCase()}`);
   if (debugMode === 'smart') {
@@ -434,14 +753,32 @@ async function main() {
           console.log(`\n🐛 [DEBUG] Step ${stepNumber}/${totalSteps} - Query ready for execution:`);
           console.log(`\n${sql}\n`);
           
-          const response = await question('Execute this query? (y/n): ');
-          const approved = response.trim().toLowerCase() === 'y' || response.trim().toLowerCase() === 'yes';
+          const response = await question('Execute this query? (y/n/edit): ');
+          const input = response.trim().toLowerCase();
           
-          if (!approved) {
-            console.log('❌ Query execution cancelled by user.\n');
+          if (input === 'y' || input === 'yes') {
+            return true;
           }
           
-          return approved;
+          if (input === 'edit' || input === 'e') {
+            // Handle manual SQL edit (Phase 3.3)
+            await handleManualSqlEdit(trimmed, sql, stepNumber, totalSteps);
+            return false; // Cancel current execution
+          }
+          
+          // User said 'n' or 'no' - show options
+          console.log('\n📝 What would you like to do?');
+          console.log('  1. Provide feedback (help me learn why this SQL is wrong)');
+          console.log('  2. Try a different question');
+          const choice = await question('Choose (1/2): ');
+          
+          if (choice.trim() === '1') {
+            // Handle text feedback (Phase 3.3)
+            await capturePreExecutionFeedback(trimmed, sql);
+          }
+          
+          console.log('❌ Query execution cancelled.\n');
+          return false;
         }
         
         // SMART mode: check both semantics AND confidence
@@ -472,20 +809,44 @@ async function main() {
           console.log(`   - Semantics: ${hasSemantics ? '✓ Detected' : '✗ None'}`);
           console.log(`   - Confidence: ${confidencePercentage}% (threshold: ${config.debugModeConfidenceThreshold}%)\n`);
           
-          const response = await question('Execute this query? (y/n): ');
-          const approved = response.trim().toLowerCase() === 'y' || response.trim().toLowerCase() === 'yes';
+          const response = await question('Execute this query? (y/n/edit): ');
+          const input = response.trim().toLowerCase();
           
-          if (!approved) {
-            console.log('❌ Query execution cancelled by user.\n');
+          if (input === 'y' || input === 'yes') {
+            return true;
           }
           
-          return approved;
+          if (input === 'edit' || input === 'e') {
+            // Handle manual SQL edit (Phase 3.3)
+            await handleManualSqlEdit(trimmed, sql, stepNumber, totalSteps);
+            return false; // Cancel current execution
+          }
+          
+          // User said 'n' or 'no' - show options
+          console.log('\n📝 What would you like to do?');
+          console.log('  1. Provide feedback (help me learn why this SQL is wrong)');
+          console.log('  2. Try a different question');
+          const choice = await question('Choose (1/2): ');
+          
+          if (choice.trim() === '1') {
+            // Handle text feedback (Phase 3.3)
+            await capturePreExecutionFeedback(trimmed, sql);
+          }
+          
+          console.log('❌ Query execution cancelled.\n');
+          return false;
         }
         
         return true; // Fallback
       };
       
-      const { answer, logs, cancelled } = await orchestrator.execute(trimmed, requestPermission);
+      // Pass conversation history to orchestrator
+      const { answer, logs, cancelled, sqlQueries } = await orchestrator.execute(
+        trimmed, 
+        conversationHistory, // Pass history for context awareness
+        requestPermission, 
+        question
+      );
       
       if (cancelled) {
         console.log('⚠️  Execution cancelled. Context has been reset.\n');
@@ -493,6 +854,7 @@ async function main() {
         lastQuestion = '';
         lastRunLogId = undefined;
         lastSqlQueries = [];
+        conversationHistory = []; // Clear conversation history on cancellation
       } else {
         console.log(`\n💡 Answer:\n${answer}\n`);
         console.log(`📊 Summary: ${logs.steps} steps, ${logs.queries} queries, ${logs.totalRows} total rows, ${logs.totalDuration}ms total\n`);
@@ -500,7 +862,26 @@ async function main() {
         // Track for correction capture
         lastQuestion = trimmed;
         lastRunLogId = logs.runLogId;
-        // Note: SQL queries are tracked in orchestrator, we'll get them from run_log if needed
+        lastSqlQueries = sqlQueries || [];
+        
+        // Add to conversation history
+        const mainSQL = sqlQueries && sqlQueries.length > 0 ? sqlQueries[0] : '';
+        const resultTable = extractTableFromSQL(mainSQL);
+        const resultColumns = mainSQL ? extractColumnsFromSQL(mainSQL) : extractColumnsFromAnswer(answer);
+        
+        conversationHistory.push({
+          question: trimmed,
+          answer: answer,
+          sqlQueries: sqlQueries || [],
+          resultColumns: resultColumns.length > 0 ? resultColumns : undefined,
+          resultTable: resultTable,
+          timestamp: new Date(),
+        });
+        
+        // Keep only recent history (sliding window)
+        if (conversationHistory.length > MAX_CONVERSATION_HISTORY) {
+          conversationHistory.shift();
+        }
       }
     } catch (error) {
       console.error(`\n✗ Error: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -508,7 +889,7 @@ async function main() {
   }
   
   // Cleanup
-  await closeInspectedDbPool();
+  await closeAllPools();
   rl.close();
   console.log('\n👋 Goodbye!');
   process.exit(0);
@@ -517,7 +898,7 @@ async function main() {
 // Handle graceful shutdown
 process.on('SIGINT', async () => {
   console.log('\n\n👋 Shutting down...');
-  await closeInspectedDbPool();
+  await closeAllPools();
   rl.close();
   process.exit(0);
 });
