@@ -544,19 +544,34 @@ docker run --env-file .env sql-agent
 
 ## Adding Business Semantics
 
-You can add business semantics to help the agent understand your domain. This is done programmatically (future feature: CLI command). For now, you can add them directly to the database:
+You can add business semantics to help the agent understand your domain. Connect to your control database and insert directly:
 
 ```sql
-INSERT INTO semantics (id, category, term, description, table_name, column_name)
+INSERT INTO semantic_entities (
+  entity_type,
+  name,
+  category,
+  description,
+  primary_table,
+  primary_column,
+  sql_fragment,
+  source,
+  approved
+)
 VALUES (
-  gen_random_uuid(),
-  'Business Terms',
-  'Active User',
+  'DIMENSION',
+  'active_user',
+  'User Dimensions',
   'A user who has logged in within the last 30 days',
   'users',
-  'last_login'
+  'last_login',
+  'last_login >= CURRENT_DATE - INTERVAL ''30 days''',
+  'manual',
+  true
 );
 ```
+
+> **Note**: In Phase 3+, semantics can be learned automatically from user corrections. See `/review-suggestions` command.
 
 ---
 

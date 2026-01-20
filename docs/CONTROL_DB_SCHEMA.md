@@ -196,22 +196,6 @@ CREATE INDEX idx_hints_domain ON context_hints(domain);
 CREATE INDEX idx_hints_type ON context_hints(hint_type);
 ```
 
-### Legacy Table: semantics (Deprecated)
-
-```sql
-CREATE TABLE semantics (
-  id UUID PRIMARY KEY,
-  category TEXT NOT NULL,
-  term TEXT NOT NULL,
-  description TEXT NOT NULL,
-  table_name TEXT,
-  column_name TEXT,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-**Note**: This table is kept for backward compatibility but new entries should go to `semantic_entities`.
-
 ## Code Integration
 
 The application code uses these tables as follows:

@@ -5,6 +5,113 @@
 
 ---
 
+## 📅 2026-01-19 (Late Evening Part 8) - Semantic Storage Architecture 🏗️
+
+**Goal**: Finalize semantic storage design and database strategy before Phase 3
+
+### What We Did ✅
+
+1. **Deep Dive into Semantic Tables**
+   - Reviewed all 4 semantic tables (entities, relationships, suggestions, deprecated)
+   - Explained 31 fields in `semantic_entities` with real-world examples
+   - Explained 7 fields in `semantic_relationships` (knowledge graph)
+   - Explained 14 fields in `semantic_suggestions` (learning queue)
+   - User confirmed understanding of table structure
+
+2. **Challenged Architecture Decisions**
+   - User questioned: Do we need `semantic_relationships`?
+   - User questioned: Is relational DB the right choice vs vector DB?
+   - User asked for pros/cons analysis
+   - Had deep architectural discussion
+
+3. **Key Architectural Decisions Made**
+
+   **Decision 1: Defer `semantic_relationships` to Phase 5+**
+   - **Why**: LLMs understand relationships from descriptions alone
+   - **When to add**: Only if you have 50+ semantics AND see repeated errors
+   - **For now**: Use rich descriptions, notes, anti_patterns instead
+   - **Impact**: Simpler architecture, less maintenance overhead
+
+   **Decision 2: Use PostgreSQL (Relational) for Semantics**
+   - **Core principle**: Trust requires transparency
+   - **Why relational**: Users need to SEE, EDIT, DELETE semantics
+   - **Vector DB = black box**: Can't audit embeddings
+   - **Relational DB = auditable table**: Human-readable, editable
+   - **Critical insight**: Users won't trust what they can't see
+
+   **Decision 3: Add pgvector in Phase 5+ (Not Separate Vector DB)**
+   - **Phase 3-4**: Simple text matching (sufficient for < 50 semantics)
+   - **Phase 5**: Add pgvector extension to PostgreSQL (semantic search)
+   - **Future (maybe)**: Separate vector DB only if 1000+ semantics
+   - **Why pgvector**: Same database, no sync complexity, 90% of benefits
+
+   **Decision 4: Hybrid Document Approach for Vectors**
+   - User suggested: Format semantics as documents, embed as chunks
+   - **Brilliant insight**: Better than embedding per-row
+   - **Approach**: Export semantics as rich text documents → embed entire document
+   - **Benefit**: Full context in retrieval, not just IDs
+   - **Implementation**: PostgreSQL = source of truth, vectors = retrieval index
+
+4. **Updated Documentation**
+
+   **ROADMAP.md**:
+   - Renamed Phase 5 to "Enhanced Semantic Discovery"
+   - Moved pgvector to Phase 5 (with detailed implementation plan)
+   - Deferred `semantic_relationships` (marked as optional)
+   - Added comprehensive "Vector Database Strategy" section
+   - Documented evolution path: PostgreSQL → pgvector → dedicated vector DB
+   - Explained document chunking strategy
+
+   **ARCHITECTURE.md**:
+   - Added new section "7. Semantic Storage Design"
+   - Documented core principle: "Trust requires transparency"
+   - Explained why relational DB over vector DB (5 reasons)
+   - Showed UI/UX implications (users need to see/edit/delete)
+   - Documented hybrid approach (source of truth + retrieval layer)
+   - Added future plans for pgvector extension
+
+### Key Insights 💡
+
+**User's Critical Insight**:
+> "Users need to trust the system. Having the relational database allows for UI/UX where we can show all the semantics that we've stored and learned in a human readable way."
+
+**This is EXACTLY right!** Trust = transparency = auditable structure
+
+**Architecture Principle**:
+```
+Black Box (Vector DB only)     ❌ Low trust
+  ↓
+Transparent Table (PostgreSQL) ✅ High trust
+  ↓
++ Semantic Search (pgvector)   ✅ Best of both worlds
+```
+
+### Files Changed 📝
+
+- **Updated**: `docs/ROADMAP.md`
+  - Phase 5 restructured (pgvector, defer relationships)
+  - Added vector database strategy section
+  - Documented document chunking approach
+  
+- **Updated**: `docs/ARCHITECTURE.md`
+  - Added "Semantic Storage Design" section
+  - Explained trust/transparency principle
+  - Documented UI/UX implications
+
+### Next Steps ➡️
+
+**Ready for Phase 3**: Learning from User Corrections
+- Clean foundation established
+- Architecture decisions documented
+- No over-engineering (deferred relationships)
+- PostgreSQL-first approach validated
+
+### Blockers 🚧
+
+None - ready to proceed with Phase 3 implementation!
+
+---
+
 ## 📅 2026-01-19 (Late Evening Part 7) - Testing Strategy Planning 🧪
 
 **Goal**: Document comprehensive testing improvement strategy
@@ -99,6 +206,19 @@
 ### Blockers 🚧
 
 None - testing is optional enhancement, not blocking progress
+
+### Cleanup Actions ✅
+
+**Deprecated `semantics` Table Removed**:
+- User requested to clean up deprecated legacy table before starting Phase 3
+- Actions taken:
+  - ✅ Removed `semantics` table documentation from CONTROL_DB_SCHEMA.md
+  - ✅ Updated README.md example to use `semantic_entities` instead of `semantics`
+  - ✅ Added note about Phase 3 learning capability
+- Verification:
+  - Code already uses `semantic_entities` (no code changes needed)
+  - No references to old table in active codebase
+  - Documentation now clean and consistent
 
 ### Additional Notes 📝
 

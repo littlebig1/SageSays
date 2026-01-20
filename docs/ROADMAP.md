@@ -249,23 +249,70 @@ npx tsx scripts/test-semantic-detection.ts
 
 ---
 
-## 📋 Phase 5: Relationships & Context (v1.5.0)
+## 📋 Phase 5: Enhanced Semantic Discovery (v1.5.0)
 
-**Goal**: Use semantic relationships and context hints
+**Goal**: Improve semantic detection and add advanced retrieval capabilities
 
-### 5.1 Semantic Relationships
+**Note**: After architectural review, we're deferring complex relationships and focusing on practical improvements first.
+
+### 5.1 Semantic Search Enhancement (pgvector)
+
+**Rationale**: As semantics grow (50+), exact text matching becomes limiting. Semantic search finds relevant semantics even with synonyms, typos, and paraphrasing.
 
 **Tasks**:
-- [ ] Implement `semantic_relationships` usage
-  - [ ] Load relationships for detected semantics
-  - [ ] Types: REQUIRES, CONFLICTS_WITH, DERIVES_FROM
-  - [ ] Pass to prompts
+- [ ] **Add pgvector extension to PostgreSQL**
+  - [ ] Enable extension: `CREATE EXTENSION vector`
+  - [ ] Add vector column to `semantic_entities`
+  - [ ] Create vector index for fast similarity search
 
-- [ ] Example: "Net Revenue" DERIVES_FROM "Gross Revenue"
-  - [ ] When asked about net revenue, load gross revenue semantic too
-  - [ ] Explain the relationship in prompt
+- [ ] **Generate embeddings for semantics**
+  - [ ] Add `description_embedding vector(1536)` column
+  - [ ] Generate embeddings on semantic create/update
+  - [ ] Use OpenAI ada-002 or similar model
+  - [ ] Store embeddings alongside structured data
 
-### 5.2 Context Hints
+- [ ] **Implement semantic similarity search**
+  - [ ] Replace regex-based `detectSemantics()` with vector search
+  - [ ] Find semantics by meaning, not just keywords
+  - [ ] Handle typos: "yesturday" → "yesterday"
+  - [ ] Match synonyms: "income" → "revenue"
+  - [ ] Rank by relevance (cosine similarity)
+
+- [ ] **Hybrid detection strategy**
+  - [ ] Exact match (fast path): Check synonyms, abbreviations
+  - [ ] Semantic search (fallback): Vector similarity when no exact match
+  - [ ] Combine both: Boost exact matches, add semantic matches
+
+**Example Improvement**:
+```
+Before (regex):
+  "What's our income?" → No match (doesn't contain "revenue")
+
+After (vector search):
+  "What's our income?" → Matches "revenue" (95% similarity)
+  "show me yesterdays sales" → Matches "yesterday" + "revenue" (handles typo)
+```
+
+**Estimated Effort**: 3-4 hours
+
+### 5.2 Semantic Relationships (Optional - Defer if Not Needed)
+
+**Decision**: Start without relationships table. LLMs understand context from descriptions alone.
+
+**Add ONLY IF you observe**:
+- Repeated errors where LLM misses dependencies
+- Need for validation rules (contradictory semantics)
+- Complex multi-step calculations requiring ordered loading
+
+**If needed, implement**:
+- [ ] Create `semantic_relationships` table
+  - [ ] Types: DEPENDS_ON, REQUIRES, CONTRADICTS, RELATED_TO
+  - [ ] Load related semantics automatically
+  - [ ] Validate semantic combinations
+
+**For now**: Use rich descriptions, notes, and anti_patterns instead
+
+### 5.3 Context Hints
 
 **Tasks**:
 - [ ] Use `context_hints` table
@@ -820,6 +867,63 @@ npx tsx scripts/test-semantic-detection.ts
 ---
 
 ## 💡 Ideas for Future Exploration
+
+### Vector Database Strategy (Phase 5+)
+
+**Current Decision**: Use PostgreSQL with pgvector extension
+
+**Rationale**:
+1. **Trust & Transparency**: Users need to see, edit, and delete semantics (relational DB excels here)
+2. **Structured Data**: Semantics have clear schema (name, category, SQL, etc.)
+3. **Complex Queries**: Filter by status, confidence, category (SQL is perfect)
+4. **Single Database**: No sync complexity, same ACID guarantees
+5. **Cost**: pgvector is free, included with PostgreSQL
+
+**Evolution Path**:
+```
+Phase 3-4: PostgreSQL only (text matching)
+  ↓
+Phase 5: Add pgvector extension (semantic search)
+  ↓
+Phase 6+: Evaluate dedicated vector DB (if scale demands)
+```
+
+**When to consider dedicated vector DB** (Pinecone, Weaviate, Qdrant):
+- You have 1000+ semantic entities
+- pgvector performance degrades
+- Need advanced features (hybrid search, multi-tenancy, etc.)
+- Scale requires specialized infrastructure
+
+**Hybrid Approach** (if dedicated vector DB used):
+- **PostgreSQL**: Source of truth (structured, editable, auditable)
+- **Vector DB**: Retrieval index (semantic search, fast matching)
+- **Sync Strategy**: 
+  - Write to PostgreSQL first
+  - Format semantics as "documents" (rich text chunks)
+  - Embed and sync to vector DB
+  - Query vector DB for retrieval, PostgreSQL for details
+
+**Document Chunking Strategy**:
+```typescript
+// Format semantic as rich document for embedding
+function formatSemanticAsDocument(semantic: SemanticEntity): string {
+  return `
+Semantic: ${semantic.name}
+Category: ${semantic.category}
+Description: ${semantic.description}
+SQL Pattern: ${semantic.sql_fragment}
+Notes: ${semantic.notes?.join('; ')}
+Common Mistakes: ${JSON.stringify(semantic.anti_patterns)}
+  `.trim();
+}
+
+// Embed entire document (better than embedding just description)
+// Vector search returns complete context
+```
+
+**Key Insight**: PostgreSQL + pgvector gives 90% of vector DB benefits without complexity!
+
+---
 
 ### LLM Abstraction Layer (Deferred)
 - Multi-provider support (OpenAI, Anthropic, local models)

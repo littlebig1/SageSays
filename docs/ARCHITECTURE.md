@@ -432,6 +432,212 @@ Execute this query? (y/n):
 
 ---
 
+### 7. Semantic Storage Design
+
+**Core Principle**: Trust requires transparency and control
+
+#### **Why Relational Database (PostgreSQL)?**
+
+We chose PostgreSQL over vector databases or document stores for semantic storage because:
+
+**1. User Trust & Transparency**
+
+Users need to **see, understand, edit, and delete** semantics to trust the system.
+
+```
+Relational DB:
+┌──────────┬──────────┬─────────────┬──────────┬──────────┐
+│ Name     │ Category │ Confidence  │ Source   │ Approved │
+├──────────┼──────────┼─────────────┼──────────┼──────────┤
+│ yesterday│ Time     │ 95%         │ learned  │ ✓        │
+│ GMV      │ Metrics  │ 100%        │ manual   │ ✓        │
+│ revenue  │ Metrics  │ 85%         │ learned  │ pending  │
+└──────────┴──────────┴─────────────┴──────────┴──────────┘
+✅ Human-readable, auditable, editable
+
+Vector DB:
+[0.234, -0.876, 0.123, ... 1533 more floats]
+❌ Black box, no visibility, hard to trust
+```
+
+**2. Structured Data Nature**
+
+Semantics ARE structured:
+- Name, category, description (strings)
+- SQL fragments (code)
+- Confidence scores (numbers)
+- Approval status (boolean)
+- Timestamps, relationships (IDs)
+
+This fits relational models perfectly.
+
+**3. Complex Querying**
+
+Common operations require structured queries:
+```sql
+-- Filter pending suggestions with high confidence
+SELECT * FROM semantic_suggestions 
+WHERE status = 'pending' 
+  AND confidence > 0.80
+ORDER BY created_at DESC;
+
+-- Find all learned semantics by category
+SELECT * FROM semantic_entities
+WHERE source = 'learned'
+  AND category = 'Financial Metrics';
+
+-- Join suggestions with their source queries
+SELECT s.*, r.question, r.sql_generated
+FROM semantic_suggestions s
+JOIN run_logs r ON s.source_run_log_id = r.id;
+```
+
+These are trivial in SQL, painful in vector databases.
+
+**4. Transactional Integrity**
+
+Approval workflow requires ACID guarantees:
+```sql
+BEGIN;
+  -- Approve suggestion
+  UPDATE semantic_suggestions 
+  SET status = 'approved', reviewed_by = 'user@example.com'
+  WHERE id = $1;
+  
+  -- Create semantic entity
+  INSERT INTO semantic_entities (...) 
+  VALUES (...);
+COMMIT;
+```
+
+Must happen atomically or not at all.
+
+**5. Familiar Tooling**
+
+- SQL queries for debugging
+- pgAdmin/DataGrip for inspection
+- Standard backup/restore
+- Your team already knows it
+
+#### **What About Vector Search?**
+
+**Current (Phase 3-4)**: Simple text matching
+```typescript
+// Exact match on name, synonyms, abbreviations
+if (question.includes(semantic.name)) { /* match */ }
+```
+
+**Sufficient for**: < 50 semantics, common terms
+
+**Future (Phase 5+)**: Add pgvector extension
+```sql
+-- Add vector column to existing table
+ALTER TABLE semantic_entities 
+ADD COLUMN description_embedding vector(1536);
+
+-- Semantic similarity search
+SELECT name, description,
+       1 - (description_embedding <=> $1) as similarity
+FROM semantic_entities
+WHERE 1 - (description_embedding <=> $1) > 0.7
+ORDER BY similarity DESC;
+```
+
+**Benefits**:
+- Find semantics by meaning, not keywords
+- Handle typos: "yesturday" → "yesterday"
+- Match synonyms: "income" → "revenue"
+- **Still in PostgreSQL** - no sync complexity!
+
+**When to use separate vector DB** (Pinecone, Weaviate):
+- Only if you have 1000+ semantics
+- Only if pgvector performance degrades
+- Not needed for 99% of use cases
+
+#### **Hybrid Approach**
+
+If you eventually need a dedicated vector DB:
+
+```
+PostgreSQL (Source of Truth)
+  ├─ Structured fields (name, category, SQL, confidence)
+  ├─ User can see, edit, delete
+  ├─ Approval workflow, transactions
+  └─ Single source of truth
+       ↓
+    [Sync on write]
+       ↓
+Vector DB (Retrieval Index)
+  ├─ Format semantics as documents
+  ├─ Embed full context (not just description)
+  ├─ Fast semantic search
+  └─ Return IDs → fetch details from PostgreSQL
+```
+
+**Document Format** (better than per-field embeddings):
+```typescript
+function formatSemanticAsDocument(semantic: SemanticEntity): string {
+  return `
+Semantic: ${semantic.name} (${semantic.category})
+Description: ${semantic.description}
+SQL: ${semantic.sql_fragment}
+Tables: ${semantic.primary_table}
+Notes: ${semantic.notes?.join('; ')}
+Common Mistakes: ${semantic.anti_patterns?.wrong}
+  `.trim();
+}
+// Embed entire document → Rich context for retrieval
+```
+
+#### **UI/UX Implications**
+
+**Critical for trust**: Users must be able to:
+
+1. **View All Semantics**
+   - Filterable table (by category, source, confidence)
+   - Search by name
+   - See full details on click
+
+2. **Edit Semantics**
+   - Inline editing of descriptions
+   - Update SQL fragments
+   - Add notes, fix mistakes
+   - Version history (future)
+
+3. **Delete Semantics**
+   - Soft delete (mark as inactive)
+   - Hard delete (admin only)
+   - Audit trail of deletions
+
+4. **Approve Suggestions**
+   - Review queue (pending suggestions)
+   - Side-by-side comparison (before/after)
+   - Accept/Reject/Modify workflow
+   - Review notes and reasoning
+
+5. **Track Learning**
+   - Which semantics came from corrections?
+   - Success rate of learned semantics
+   - Most-used vs never-used semantics
+   - Learning velocity over time
+
+**Future**: Web UI for semantic management (currently CLI-only)
+
+#### **Key Takeaway**
+
+**Relational database for semantics = transparency = trust**
+
+Users can't trust a black box. They need to:
+- See what the system knows
+- Understand where it learned it
+- Fix mistakes when they happen
+- Delete bad semantics
+- Control the knowledge base
+
+PostgreSQL provides this. Vector databases don't (yet).
+
+---
+
 ## Safety Mechanisms
 
 ### 1. SQL Validation (Guard)
